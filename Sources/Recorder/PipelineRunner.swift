@@ -1,19 +1,6 @@
 import Foundation
 
-/// Dispara a pipeline local de processamento (repo `transcribe`) sobre uma
-/// gravação recém-salva.
-///
-/// Substitui o `GeminiTranscriber`: em vez de enviar o áudio para a API do
-/// Gemini, escreve um `meta.json` ao lado da gravação e chama
-/// `docker compose run --rm app run`. A pipeline transcreve com Whisper local,
-/// resume e publica no Notion.
-///
-/// O `meta.json` é o que resolve a identificação do contexto: quem gravou
-/// escolhe na hora (com o evento do calendário como sugestão) e a pipeline
-/// obedece, em vez de tentar adivinhar pelo horário.
 struct PipelineRunner {
-    /// Caminho absoluto do `docker`. App de GUI não herda `/usr/local/bin` no
-    /// PATH, então resolver por nome falharia silenciosamente.
     static let dockerCandidates = [
         "/usr/local/bin/docker",
         "/opt/homebrew/bin/docker",
@@ -49,18 +36,12 @@ struct PipelineRunner {
         }
     }
 
-    /// Diretório do repo `transcribe`, onde vive o docker-compose.yml.
     var pipelineDir: String
 
     static func resolveDocker() -> String? {
         dockerCandidates.first { FileManager.default.isExecutableFile(atPath: $0) }
     }
 
-    /// Grava o `meta.json` que a pipeline lê no `import`.
-    ///
-    /// Escrito ANTES de rodar a pipeline, e mantido depois: se a pipeline
-    /// falhar, a escolha de contexto não se perde e a próxima tentativa não
-    /// precisa perguntar de novo.
     static func writeMeta(folderURL: URL, context: Context) throws {
         var payload: [String: Any] = [
             "context": context.context,
@@ -76,10 +57,6 @@ struct PipelineRunner {
         try data.write(to: folderURL.appendingPathComponent("meta.json"), options: .atomic)
     }
 
-    /// Roda a pipeline e devolve a saída combinada.
-    ///
-    /// Chama `run`, que encadeia import, transcrição, resumo e publicação. O
-    /// `import` encontra a gravação pelo `meta.json` que acabou de ser escrito.
     func run(folderURL: URL, context: Context) async throws -> String {
         guard let docker = Self.resolveDocker() else { throw Failure.dockerMissing }
         var isDir: ObjCBool = false
@@ -103,8 +80,6 @@ struct PipelineRunner {
 
         try process.run()
 
-        // Lê enquanto roda: uma reunião longa produz saída suficiente para
-        // encher o buffer do pipe, e aí o processo travaria esperando leitura.
         let handle = pipe.fileHandleForReading
         var output = ""
         while true {
@@ -120,11 +95,6 @@ struct PipelineRunner {
         return output
     }
 
-    /// Contextos disponíveis: as subpastas da raiz de mídia da pipeline.
-    ///
-    /// Lidos do disco em vez de configurados aqui, porque é a subpasta que a
-    /// pipeline usa como contexto — criar uma pasta nova em `~/Movies/OBS` já
-    /// a faz aparecer no picker, sem tocar em configuração.
     static func discoverContexts(pipelineDir: String) -> [String] {
         let root = mediaRoot(pipelineDir: pipelineDir)
         let items = (try? FileManager.default.contentsOfDirectory(
@@ -136,10 +106,6 @@ struct PipelineRunner {
             .sorted()
     }
 
-    /// `MEDIA_ROOT_HOST` do .env da pipeline, com `~/Movies/OBS` como fallback.
-    ///
-    /// Ler do .env evita que o app e a pipeline discordem sobre onde a mídia
-    /// vive — um desencontro que só apareceria na hora de processar.
     static func mediaRoot(pipelineDir: String) -> URL {
         let envPath = (pipelineDir as NSString).appendingPathComponent(".env")
         if let text = try? String(contentsOfFile: envPath, encoding: .utf8) {
@@ -154,10 +120,6 @@ struct PipelineRunner {
         return URL(fileURLWithPath: NSHomeDirectory()).appendingPathComponent("Movies/OBS")
     }
 
-    /// Resultado legível de uma rodada: título da ata e link do Notion.
-    ///
-    /// A primeira versão devolvia a última linha do log, que era o id cru da
-    /// página — um UUID no painel não diz nada a quem acabou de gravar.
     struct Outcome {
         var headline: String
         var notionURL: URL?
@@ -172,7 +134,6 @@ struct PipelineRunner {
             .last { $0.hasPrefix("https://notion.so/") }
             .flatMap(URL.init(string:))
 
-        // `ok "Título da ata"` é a linha que o sync emite ao publicar.
         if let ok = lines.last(where: { $0.hasPrefix("ok \"") }) {
             let title = ok.dropFirst(4).dropLast(ok.hasSuffix("\"") ? 1 : 0)
             return Outcome(headline: String(title), notionURL: url)

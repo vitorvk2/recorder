@@ -1,26 +1,6 @@
 import SwiftUI
 import AppKit
 
-/// The full menu-bar panel UI for the recorder.
-///
-/// Layout (top -> bottom):
-///   1. Header — estado + tempo decorrido
-///   2. Zona de ação — contexto + UM botão proeminente por vez:
-///      Gravar (parado) · Pausar/Salvar/Descartar (gravando) ·
-///      Processar (gravação pronta) · resultado com link do Notion
-///   3. Medidores — "Sistema" e "Microfone"
-///   4. Agenda — eventos do dia, com gravar direto na linha
-///   5. Gravações recentes
-///   6. Rodapé — pasta, Settings, Quit
-///
-/// Preferences (your name, pipeline folder, contexto, auto-processamento,
-/// and silence auto-stop) live in a dedicated Preferences window — see
-/// `PreferencesView` / `PreferencesWindowController` — opened from the footer's
-/// "Settings…" button or ⌘,.
-///
-/// Pure SwiftUI, compiles under Swift 5 language mode. Reads the shared @Observable model
-/// from the environment and never mutates audio objects directly — it only calls the
-/// model's intent methods (startRecording / togglePause / saveAndStop / trashAndStop / quit).
 struct RecorderPanel: View {
     @Environment(RecorderModel.self) private var model
 
@@ -30,9 +10,6 @@ struct RecorderPanel: View {
         VStack(alignment: .leading, spacing: 14) {
             header
 
-            // Zona de ação: escolher onde vai + o botão que importa agora.
-            // Um único botão proeminente por vez — antes havia dois (Gravar e
-            // Processar), e nada indicava qual era o passo seguinte.
             actionZone
 
             Divider()
@@ -53,8 +30,6 @@ struct RecorderPanel: View {
         .padding(14)
         .frame(width: panelWidth)
     }
-
-    // MARK: - 1. Header
 
     private var header: some View {
         HStack(alignment: .firstTextBaseline, spacing: 10) {
@@ -77,12 +52,6 @@ struct RecorderPanel: View {
         }
     }
 
-    // MARK: - 2. Ação
-
-    /// Contexto + ação principal, numa unidade só.
-    ///
-    /// O picker fica junto do botão porque "gravar" e "onde isso vai parar" são
-    /// a mesma decisão; solto no meio do painel ele não pertencia a nada.
     @ViewBuilder
     private var actionZone: some View {
         VStack(alignment: .leading, spacing: 10) {
@@ -126,8 +95,6 @@ struct RecorderPanel: View {
         }
     }
 
-    /// Gravar. Proeminente só quando é a próxima ação; quando há gravação
-    /// esperando processamento, ela é que ganha o destaque.
     @ViewBuilder
     private func recordButton(prominent: Bool) -> some View {
         let label = Label("Gravar", systemImage: "record.circle.fill")
@@ -147,8 +114,6 @@ struct RecorderPanel: View {
         }
     }
 
-    /// Gravação salva esperando processamento — aqui ela é a ação principal,
-    /// porque é o passo seguinte natural de quem acabou de parar de gravar.
     private var pendingRow: some View {
         HStack(spacing: 10) {
             Image(systemName: "waveform")
@@ -194,7 +159,6 @@ struct RecorderPanel: View {
         .background(Color.secondary.opacity(0.10), in: RoundedRectangle(cornerRadius: 8))
     }
 
-    /// Resultado: o título da ata e um link — não quatro botões de log.
     private func resultRow(_ outcome: PipelineRunner.Outcome) -> some View {
         HStack(alignment: .top, spacing: 10) {
             Image(systemName: outcome.notionURL == nil
@@ -292,15 +256,6 @@ struct RecorderPanel: View {
         }
     }
 
-    // MARK: - 2. Primary controls
-
-    // MARK: - 2a. Contexto e disparo da pipeline
-
-    // MARK: - 2b. Transcription
-
-    /// A draggable chip representing the transcript file. Dragging it out of the
-    /// panel provides the actual file (via `NSItemProvider(contentsOf:)`), so it
-    /// can be dropped into Finder, attached in Mail, or inserted into an editor.
     private func transcriptDragHandle(_ url: URL) -> some View {
         let folder = url.deletingLastPathComponent().lastPathComponent
         return HStack(spacing: 6) {
@@ -334,16 +289,12 @@ struct RecorderPanel: View {
         .help("Drag \(folder)/\(url.lastPathComponent) into another app or window")
     }
 
-    // MARK: - 3. Level meters
-
     private var meters: some View {
         VStack(alignment: .leading, spacing: 8) {
             LevelMeter(label: "Sistema",   level: model.desktopLevel, tint: .green)
             LevelMeter(label: "Microfone", level: model.micLevel,     tint: .blue)
         }
     }
-
-    // MARK: - 4. Meetings
 
     private var meetingsSection: some View {
         VStack(alignment: .leading, spacing: 6) {
@@ -380,8 +331,6 @@ struct RecorderPanel: View {
         }
     }
 
-    // MARK: - 4b. Recent recordings
-
     private var recentSection: some View {
         VStack(alignment: .leading, spacing: 6) {
             Text("Gravações recentes")
@@ -398,8 +347,6 @@ struct RecorderPanel: View {
     @ViewBuilder
     private func recentRow(_ entry: RecordingEntry) -> some View {
         HStack(spacing: 8) {
-            // Draggable region: icon + title/subtitle + grip. Dragging it out
-            // provides the transcript file (or the audio if there's no transcript).
             HStack(spacing: 8) {
                 Image(systemName: entry.hasTranscript ? "checkmark.circle.fill" : "waveform.circle.fill")
                     .foregroundStyle(entry.hasTranscript ? Color.accentColor : Color.secondary)
@@ -428,7 +375,6 @@ struct RecorderPanel: View {
                   ? "Drag the transcript out, or use ⋯ for more"
                   : "Drag the audio out, or use ⋯ to transcribe")
 
-            // Actions menu.
             Menu {
                 if let transcript = entry.transcriptURL {
                     Button { model.copyTextOfFile(transcript) } label: {
@@ -468,7 +414,6 @@ struct RecorderPanel: View {
         )
     }
 
-    /// The file dragged out of a recent row: transcript if present, else audio.
     private func recentDragProvider(_ entry: RecordingEntry) -> NSItemProvider {
         if let transcript = entry.transcriptURL {
             return NSItemProvider(contentsOf: transcript) ?? NSItemProvider()
@@ -479,14 +424,12 @@ struct RecorderPanel: View {
         return NSItemProvider()
     }
 
-    /// "6/3/26, 10:15 AM · Transcript" — compact date + status.
     private func recentSubtitle(_ entry: RecordingEntry) -> String {
         let formatter = DateFormatter()
         formatter.dateStyle = .short
         formatter.timeStyle = .short
         let when = formatter.string(from: entry.date)
-        // O que importa aqui é em que ponto do fluxo a gravação está, não que
-        // formato de arquivo existe na pasta.
+
         let status: String
         if entry.hasTranscript {
             status = "publicada"
@@ -497,8 +440,6 @@ struct RecorderPanel: View {
         }
         return "\(when) · \(status)"
     }
-
-    // MARK: - 6. Footer
 
     private var footer: some View {
         HStack(spacing: 14) {
@@ -531,16 +472,10 @@ struct RecorderPanel: View {
         }
     }
 
-    /// Open the dedicated Preferences window. The controller handles activating
-    /// the app and bringing the window front — necessary for a menu-bar–only
-    /// (`.accessory`) app, where windows otherwise open behind other apps.
     private func openPreferences() {
         PreferencesWindowController.shared.show(model: model)
     }
 
-    // MARK: - Formatting helpers
-
-    /// mm:ss (or h:mm:ss past an hour) for the elapsed timer.
     private func formattedElapsed(_ interval: TimeInterval) -> String {
         let total = Int(interval.rounded(.down))
         let hours = total / 3600
@@ -553,10 +488,6 @@ struct RecorderPanel: View {
     }
 }
 
-// MARK: - LevelMeter
-
-/// A simple horizontal level meter: a label, a track, and a tinted fill that
-/// grows with `level` (0...1). Uses GeometryReader + Capsule so it animates smoothly.
 private struct LevelMeter: View {
     let label: String
     let level: Float
@@ -584,10 +515,6 @@ private struct LevelMeter: View {
     }
 }
 
-// MARK: - MeetingRow
-
-/// One meeting in the list: title + time range, with a small record button.
-/// The in-progress meeting is highlighted with a tinted background + dot.
 private struct MeetingRow: View {
     let meeting: Meeting
     let inProgress: Bool
@@ -596,7 +523,6 @@ private struct MeetingRow: View {
 
     var body: some View {
         HStack(spacing: 8) {
-            // Live dot for the in-progress meeting.
             Circle()
                 .fill(inProgress ? Color.red : Color.clear)
                 .frame(width: 6, height: 6)
@@ -613,7 +539,6 @@ private struct MeetingRow: View {
 
             Spacer(minLength: 4)
 
-            // Per-meeting record button. Disabled while a recording is already running.
             Button {
                 onRecord()
             } label: {
@@ -632,7 +557,6 @@ private struct MeetingRow: View {
         )
     }
 
-    /// "2:00 – 3:00 PM" style range using the user's locale/short time style.
     private func timeRange(_ start: Date, _ end: Date) -> String {
         let fmt = DateFormatter()
         fmt.timeStyle = .short

@@ -1,29 +1,23 @@
 import Foundation
 
-/// One past recording on disk (a folder under ~/Documents/Recordings).
 struct RecordingEntry: Identifiable, Equatable {
-    /// Folder path — stable identity.
     var id: String { folderURL.path }
     let folderURL: URL
-    /// Parsed meeting title (nil for ad-hoc recordings).
+
     let title: String?
-    /// Best timestamp for the recording (parsed from the folder name, else file date).
+
     let date: Date
-    /// audio.m4a, if it exists.
+
     let audioURL: URL?
-    /// pipeline.log, if the pipeline already ran on this folder.
+
     let transcriptURL: URL?
-    /// Context chosen when recording, read from meta.json.
+
     let context: String?
-    /// Whether the pipeline already produced processed.m4a for this folder.
+
     let isPrepared: Bool
 
-    /// Kept as `hasTranscript` so the drag/menu code reads the same; it now
-    /// means "the pipeline already ran here".
     var hasTranscript: Bool { transcriptURL != nil }
 
-    /// A title someone can recognize: the meeting name when the calendar had
-    /// one, otherwise the context — never the useless literal "Recording".
     var displayTitle: String {
         if let title, !title.isEmpty { return title }
         if let context, !context.isEmpty { return context }
@@ -31,12 +25,7 @@ struct RecordingEntry: Identifiable, Equatable {
     }
 }
 
-/// Reads the on-disk recordings library so the panel can show prior recordings
-/// (and their transcripts) after a restart — the in-memory list doesn't survive
-/// relaunches.
 enum RecordingsLibrary {
-
-    /// Context recorded in a folder's meta.json, if any.
     static func contextFromMeta(_ folderURL: URL) -> String? {
         let url = folderURL.appendingPathComponent("meta.json")
         guard let data = try? Data(contentsOf: url),
@@ -47,7 +36,6 @@ enum RecordingsLibrary {
         return ctx
     }
 
-    /// ~/Documents/Recordings (not created here).
     static func recordingsRoot() -> URL? {
         guard let documents = try? FileManager.default.url(
             for: .documentDirectory, in: .userDomainMask, appropriateFor: nil, create: false
@@ -55,7 +43,6 @@ enum RecordingsLibrary {
         return documents.appendingPathComponent("Recordings", isDirectory: true)
     }
 
-    /// The `limit` most recent recording folders, newest first.
     static func recent(limit: Int) -> [RecordingEntry] {
         let fm = FileManager.default
         guard let root = recordingsRoot(),
@@ -79,7 +66,7 @@ enum RecordingsLibrary {
             let hasTranscript = fm.fileExists(atPath: transcript.path)
             let hasRaw = fm.fileExists(atPath: url.appendingPathComponent("desktop.caf").path)
                 || fm.fileExists(atPath: url.appendingPathComponent("mic.caf").path)
-            // Only surface folders that actually look like recordings.
+
             guard hasAudio || hasTranscript || hasRaw else { return nil }
 
             let (parsedDate, title) = parseFolderName(url.lastPathComponent)
@@ -101,7 +88,6 @@ enum RecordingsLibrary {
         return Array(entries.sorted { $0.date > $1.date }.prefix(limit))
     }
 
-    /// Parse "yyyy-M-d-HHmm[-title][-N]" into (date, title). Best-effort.
     static func parseFolderName(_ name: String) -> (Date?, String?) {
         let parts = name.split(separator: "-", omittingEmptySubsequences: false).map(String.init)
         guard parts.count >= 4,
@@ -118,8 +104,6 @@ enum RecordingsLibrary {
         components.minute = hhmm % 100
         let date = Calendar(identifier: .gregorian).date(from: components)
 
-        // Title is everything after the date/time, minus a trailing numeric
-        // collision suffix (e.g. "-2") added when two recordings share a minute.
         var titleParts = Array(parts.dropFirst(4))
         if let last = titleParts.last, last.count <= 3, !last.isEmpty, last.allSatisfy(\.isNumber) {
             titleParts.removeLast()

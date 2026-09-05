@@ -5,35 +5,10 @@ import AudioToolbox
 import Accelerate
 import os
 
-/// Core Audio process tap (global system mix) -> desktop.caf
-///
-/// Captures the entire system-output mix via a `CATapDescription` process tap wrapped in a
-/// private, **tap-only** aggregate device (the canonical AudioCap pattern: default output as the
-/// `"master"` sub-device, the tap in the tap-list with drift compensation). The IOProc downmixes
-/// each buffer to mono and hands it to a lock-free ring buffer; a dedicated background thread
-/// drains that ring to a MONO Float32 `AVAudioFile`. It also records the first sample's mach host
-/// time for cross-stream alignment and computes per-buffer RMS for the meter.
-///
-/// IMPORTANT: the IOProc must NOT call `AVAudioFile.write` or allocate — both block/malloc and
-/// overran the ~10 ms realtime deadline, tearing the desktop stream at every IO-buffer boundary
-/// (audible as broadband clicks / "distortion"). All disk work lives on the writer thread.
-///
-/// macOS 26 has a confirmed regression where `AudioHardwareCreateProcessTap` + aggregate silently
-/// delivers all-zero PCM after extended uptime / sample-rate / Bluetooth changes while the IOProc
-/// keeps firing. We run a WATCHDOG: if RMS ≈ 0 for ~3s while the default output device is active,
-/// we tear down BOTH the tap and the aggregate and rebuild them, continuing to append to the SAME
-/// `AVAudioFile`.
 final class SystemAudioTap {
-
-
-    // MARK: - Public callbacks (called on audio / arbitrary threads)
-
-    /// dBFS per buffer (throttled to ~10-20 Hz). Called on the audio thread.
     var onLevelDB: ((Float) -> Void)?
-    /// Called on an arbitrary thread on a fatal, unrecoverable error.
-    var onFatalError: ((Error) -> Void)?
 
-    // MARK: - Errors
+    var onFatalError: ((Error) -> Void)?
 
     enum TapError: LocalizedError {
         case createTapFailed(OSStatus)
@@ -70,11 +45,6 @@ final class SystemAudioTap {
         }
     }
 
-    // MARK: - State guarded by `lock`
-
-    /// Single lock protecting all the mutable Core Audio handles + flags below. Acquired briefly on
-    /// both the control thread and (very briefly) checked against on the audio thread for the
-    /// `paused` gate via a dedicated atomic flag, so the realtime path stays lock-light.
     private let lock = OSAllocatedUnfairLock()
 
     private var tapID = AudioObjectID(kAudioObjectUnknown)
@@ -82,68 +52,48 @@ final class SystemAudioTap {
     private var ioProcID: AudioDeviceIOProcID?
     private var tapUUID = UUID()
 
-    /// The destination file. Stays open across watchdog rebuilds; finalized only on `stop()`.
     private var file: AVAudioFile?
-    /// The processing format we write to disk (MONO Float32 at the tap's sample rate).
+
     private var writeFormat: AVAudioFormat?
-    /// The format the tap actually delivers in the IOProc (used to wrap the incoming buffer list).
+
     private var tapFormat: AVAudioFormat?
 
     private var destinationURL: URL?
     private var started = false
 
-    // Accumulated capture result.
     private var firstHostTime: UInt64?
     private var capturedSampleRate: Double = 0
-    /// Frames actually written to disk. Updated ONLY by the writer thread during
-    /// a session; read by `stop()` after the writer has been joined.
+
     private var capturedFrames: AVAudioFramePosition = 0
 
-    // MARK: - Off-realtime disk writer (ring buffer + consumer thread)
-
-    /// Filled by the IOProc (producer), drained by `writerThread` (consumer).
     private var ring: FloatRingBuffer?
-    /// Preallocated mono scratch for multi-channel downmix in the IOProc (no
-    /// per-callback allocation). Sized to comfortably exceed any IO buffer.
+
     private var scratch: UnsafeMutablePointer<Float>?
     private let scratchCapacity = 16_384
-    /// Background thread that drains `ring` to `file`.
+
     private var writerThread: Thread?
-    /// Set true by `stop()` to tell the writer to drain and exit.
+
     private let writerShouldStop = OSAllocatedUnfairLock<Bool>(initialState: false)
 
     private static let log = Logger(subsystem: "com.tobi.Recorder", category: "SystemAudioTap")
 
-    // MARK: - Realtime-path flags (separately lock-protected so the IOProc never blocks on `lock`)
-
     private let paused = OSAllocatedUnfairLock<Bool>(initialState: false)
 
-    /// Host time (mach) of the last buffer the IOProc observed with non-trivial RMS. Used by the
-    /// watchdog to detect the zero-buffer regression. Initialized at start.
     private let lastLoudHostTime = OSAllocatedUnfairLock<UInt64>(initialState: 0)
-    /// Host time of the most recent IOProc callback (proves the proc is still firing).
-    private let lastCallbackHostTime = OSAllocatedUnfairLock<UInt64>(initialState: 0)
 
-    // MARK: - Watchdog
+    private let lastCallbackHostTime = OSAllocatedUnfairLock<UInt64>(initialState: 0)
 
     private var watchdogTimer: DispatchSourceTimer?
     private let watchdogQueue = DispatchQueue(label: "systemaudiotap.watchdog")
-    /// If output is audibly running but the tap delivers ~silence for this long, rebuild.
+
     private let watchdogSilenceThreshold: TimeInterval = 3.0
     private var rebuilding = false
-    /// Quantas vezes o watchdog reconstruiu tap + aggregate nesta gravacao.
-    ///
-    /// Cada reconstrucao derruba e recria um aggregate que contem o
-    /// dispositivo de saida, o que interrompe o audio AO VIVO por um
-    /// instante. Sem esse numero nao da para separar "o macOS 26 esta com o
-    /// bug do tap zerado" de "o audio de origem ja estava ruim".
+
     private(set) var rebuildCount = 0
 
-    // Throttle the meter callback to ~15 Hz.
     private var lastMeterPostHostTime: UInt64 = 0
-    private static let meterIntervalNanos: UInt64 = 66_000_000 // ~15 Hz
+    private static let meterIntervalNanos: UInt64 = 66_000_000
 
-    // mach timebase, cached.
     private static let timebase: mach_timebase_info_data_t = {
         var tb = mach_timebase_info_data_t()
         mach_timebase_info(&tb)
@@ -152,14 +102,11 @@ final class SystemAudioTap {
 
     private static func hostTimeToNanos(_ hostTime: UInt64) -> UInt64 {
         let tb = timebase
-        // Avoid overflow on the multiply for large host times.
+
         return hostTime / UInt64(tb.denom) * UInt64(tb.numer)
             + (hostTime % UInt64(tb.denom)) * UInt64(tb.numer) / UInt64(tb.denom)
     }
 
-    // MARK: - Public API
-
-    /// Build the tap + aggregate, open the file, install the IOProc and start the device.
     func start(writingTo url: URL) throws {
         lock.lock()
         defer { lock.unlock() }
@@ -171,23 +118,19 @@ final class SystemAudioTap {
         firstHostTime = nil
         capturedFrames = 0
 
-        // 1) Build tap + aggregate and read the tap format.
         let built = try buildTapAndAggregateLocked()
 
-        // 2) Open the destination file MONO Float32 at the tap's sample rate.
         guard let writeFmt = AVAudioFormat(
             commonFormat: .pcmFormatFloat32,
             sampleRate: built.tapFormat.sampleRate,
             channels: 1,
             interleaved: false
         ) else {
-            // Clean up the partially-built tap/aggregate before throwing.
             destroyTapAndAggregateLocked()
             throw TapError.invalidTapFormat
         }
 
         do {
-            // AVAudioFile flushes per write -> at most one buffer lost on crash.
             let f = try AVAudioFile(
                 forWriting: url,
                 settings: [
@@ -212,9 +155,6 @@ final class SystemAudioTap {
         self.tapFormat = built.tapFormat
         self.capturedSampleRate = built.tapFormat.sampleRate
 
-        // 3) Spin up the off-realtime writer (ring + drain thread) BEFORE the
-        //    IOProc starts producing. ~4 s of mono float headroom; the IOProc
-        //    only ever copies into this ring, never touches the disk.
         let ringFrames = max(Int(writeFmt.sampleRate * 4), 48_000)
         let newRing = FloatRingBuffer(capacityFrames: ringFrames)
         self.ring = newRing
@@ -222,7 +162,6 @@ final class SystemAudioTap {
         writerShouldStop.withLock { $0 = false }
         startWriterThread(file: self.file!, writeFormat: writeFmt, ring: newRing)
 
-        // 4) Install IOProc + start the aggregate device.
         do {
             try installIOProcAndStartLocked()
         } catch {
@@ -230,7 +169,7 @@ final class SystemAudioTap {
             self.ring = nil
             self.scratch?.deallocate()
             self.scratch = nil
-            file = nil   // finalize/close the just-opened file
+            file = nil
             destroyTapAndAggregateLocked()
             throw error
         }
@@ -239,19 +178,16 @@ final class SystemAudioTap {
 
         rebuildCount = 0
 
-        // Prime watchdog timestamps to "now".
         let now = mach_absolute_time()
         lastLoudHostTime.withLock { $0 = now }
         lastCallbackHostTime.withLock { $0 = now }
         startWatchdog()
     }
 
-    /// Gate writes. Device keeps running, meters keep updating. Thread-safe.
     func setPaused(_ isPaused: Bool) {
         paused.withLock { $0 = isPaused }
     }
 
-    /// Stop the IOProc, destroy the aggregate + tap, finalize the file.
     func stop() -> CaptureResult {
         stopWatchdog()
 
@@ -267,12 +203,8 @@ final class SystemAudioTap {
         }
         started = false
 
-        // Tear down Core Audio first: AudioDeviceStop blocks until the last
-        // IOProc callback returns, so the producer is fully stopped after this.
         destroyTapAndAggregateLocked()
 
-        // Drain whatever the IOProc already enqueued, then join the writer so
-        // it releases its reference to `file` before we finalize it.
         stopWriterThreadAndDrain()
 
         if let dropped = ring?.totalDropped, dropped > 0 {
@@ -282,7 +214,6 @@ final class SystemAudioTap {
         scratch?.deallocate()
         scratch = nil
 
-        // Finalize the file (setting nil flushes + closes — last reference now).
         file = nil
         writeFormat = nil
         tapFormat = nil
@@ -294,22 +225,16 @@ final class SystemAudioTap {
         )
     }
 
-    // MARK: - Build / teardown (must hold `lock`)
-
     private struct BuildResult {
         var tapFormat: AVAudioFormat
     }
 
-    /// Create the process tap and the private tap-only aggregate device, and read the tap format.
-    /// Caller MUST hold `lock`. On any failure, partially-created objects are destroyed and the
-    /// error is thrown.
     @discardableResult
     private func buildTapAndAggregateLocked() throws -> BuildResult {
-        // --- 1. Process tap: global stereo mix, passthrough, private. ---
         let desc = CATapDescription(stereoGlobalTapButExcludeProcesses: [])
         desc.uuid = tapUUID
-        desc.muteBehavior = .unmuted   // passthrough: the user still hears their audio
-        desc.isPrivate = true          // do not advertise this tap system-wide
+        desc.muteBehavior = .unmuted
+        desc.isPrivate = true
 
         var newTapID = AudioObjectID(kAudioObjectUnknown)
         let tapStatus = AudioHardwareCreateProcessTap(desc, &newTapID)
@@ -318,7 +243,6 @@ final class SystemAudioTap {
         }
         self.tapID = newTapID
 
-        // --- 2. Default system output device + its UID (the aggregate's master clock). ---
         let outputDevice: AudioObjectID
         do {
             outputDevice = try Self.defaultSystemOutputDevice()
@@ -337,8 +261,6 @@ final class SystemAudioTap {
             throw error
         }
 
-        // --- 3. Private, tap-only aggregate device. Output = master (drift comp off); tap in the
-        //        tap-list with drift compensation on. The mic is NOT part of this aggregate. ---
         let aggregateUID = UUID().uuidString
         let aggregateDescription: [String: Any] = [
             kAudioAggregateDeviceNameKey: "Recorder System Tap",
@@ -372,7 +294,6 @@ final class SystemAudioTap {
         }
         self.aggregateID = newAggregateID
 
-        // --- 4. Read the tap's actual stream format. ---
         let format: AVAudioFormat
         do {
             format = try Self.tapStreamFormat(newTapID)
@@ -387,8 +308,6 @@ final class SystemAudioTap {
         return BuildResult(tapFormat: format)
     }
 
-    /// Install the IOProc on the aggregate and start it. Caller MUST hold `lock`. Uses the current
-    /// `tapFormat` (set by the caller before calling, except during a rebuild where we re-read it).
     private func installIOProcAndStartLocked() throws {
         guard aggregateID != kAudioObjectUnknown else {
             throw TapError.createIOProcFailed(kAudioHardwareBadObjectError)
@@ -397,10 +316,6 @@ final class SystemAudioTap {
             throw TapError.invalidTapFormat
         }
 
-        // The IOProc runs on a Core Audio realtime thread. It captures `self` weakly via an
-        // unmanaged-free closure: we keep `self` alive for the recording's duration and only tear
-        // the proc down (synchronously) before releasing, so a strong capture is safe and avoids
-        // per-callback retain traffic.
         var newProcID: AudioDeviceIOProcID?
         let ioBlock: AudioDeviceIOBlock = { [weak self] _, inInputData, inInputTime, _, _ in
             guard let self else { return }
@@ -423,8 +338,6 @@ final class SystemAudioTap {
         }
     }
 
-    /// Destroy the IOProc, aggregate device, and tap. Caller MUST hold `lock`. Best-effort; safe to
-    /// call when partially built. Does NOT touch the file (so a watchdog rebuild keeps appending).
     private func destroyTapAndAggregateLocked() {
         if let procID = ioProcID, aggregateID != kAudioObjectUnknown {
             AudioDeviceStop(aggregateID, procID)
@@ -442,8 +355,6 @@ final class SystemAudioTap {
         }
     }
 
-    // MARK: - IO callback (realtime thread)
-
     private func handleIO(
         inputData: UnsafePointer<AudioBufferList>,
         inputTime: UnsafePointer<AudioTimeStamp>,
@@ -452,7 +363,6 @@ final class SystemAudioTap {
         let now = mach_absolute_time()
         lastCallbackHostTime.withLock { $0 = now }
 
-        // Wrap the incoming buffer list without copying. If the format is unexpected, bail.
         guard let pcm = AVAudioPCMBuffer(
             pcmFormat: tapFormat,
             bufferListNoCopy: inputData,
@@ -467,48 +377,29 @@ final class SystemAudioTap {
         let channelCount = Int(tapFormat.channelCount)
         let n = vDSP_Length(frameCount)
 
-        // --- Compute RMS for the meter + watchdog (mix of channel 0, cheap). ---
         var rms: Float = 0
         vDSP_rmsqv(channelData[0], 1, &rms, n)
-        if rms > 0.000_03 { // ~ -90 dBFS; treat anything above as "loud" for the watchdog
+        if rms > 0.000_03 {
             lastLoudHostTime.withLock { $0 = now }
         }
         let db: Float = rms > 0 ? 20 * log10(rms) : -120
 
-        // Throttle meter callbacks to ~15 Hz.
         if Self.hostTimeToNanos(now &- lastMeterPostHostTime) >= Self.meterIntervalNanos {
             lastMeterPostHostTime = now
             onLevelDB?(db)
         }
 
-        // --- Honor pause gate (meters keep updating above; only the write is gated). ---
         if paused.withLock({ $0 }) {
             return
         }
 
-        // --- Downmix to mono and enqueue for the writer thread. ---
-        // REALTIME-SAFE ONLY: no allocation, no file I/O, no `self.lock` here. We downmix into a
-        // preallocated scratch buffer (vDSP) and hand the samples to a lock-free ring; a background
-        // thread drains the ring to disk. The ring/scratch pointers are assigned before the device
-        // is started and cleared only after AudioDeviceStop returns (which blocks until this
-        // callback finishes), so these reads are safe lock-free with a single producer.
-        // Taking `self.lock` here would deadlock against stop()/rebuild, which hold it across
-        // AudioDeviceStop.
         guard let ring = self.ring else { return }
 
-        // Record the first sample's host time for cross-stream alignment.
         if firstHostTime == nil {
             firstHostTime = inputTime.pointee.mHostTime
         }
 
-        // O layout importa: kAudioTapPropertyFormat costuma reportar estereo
-        // INTERCALADO (flags sem kAudioFormatFlagIsNonInterleaved, bytesPerFrame
-        // = 8). Nesse caso `floatChannelData` devolve UM ponteiro com L,R,L,R e
-        // `channelData[1]` esta fora dos limites. Tratar isso como nao
-        // intercalado copiava metade do buffer alternando canais: audio a meia
-        // velocidade, cortado, com um salto em cada fronteira de bloco.
         if channelCount <= 1 {
-            // Ja mono: enfileira direto do buffer de entrada.
             ring.write(channelData[0], count: Int(frameCount))
         } else if let scratch = self.scratch {
             let interleaved = tapFormat.isInterleaved
@@ -519,7 +410,6 @@ final class SystemAudioTap {
                 let cn = vDSP_Length(chunk)
 
                 if interleaved {
-                    // Um buffer so; canal `ch` e acessado com passo `channelCount`.
                     let base = channelData[0] + offset * channelCount
                     memcpy_stride(dst: scratch, src: base, stride: channelCount, count: chunk)
                     for ch in 1..<channelCount {
@@ -527,7 +417,6 @@ final class SystemAudioTap {
                                   scratch, 1, cn)
                     }
                 } else {
-                    // Um buffer por canal, todos com passo 1.
                     memcpy(scratch, channelData[0] + offset, chunk * MemoryLayout<Float>.stride)
                     for ch in 1..<channelCount {
                         vDSP_vadd(scratch, 1, channelData[ch] + offset, 1, scratch, 1, cn)
@@ -542,9 +431,6 @@ final class SystemAudioTap {
         }
     }
 
-    /// Copia `count` amostras de um buffer intercalado (passo `stride`) para um
-    /// destino contiguo. Usa vDSP para ficar sem laco em Swift no caminho
-    /// realtime; nao aloca nada.
     @inline(__always)
     private func memcpy_stride(
         dst: UnsafeMutablePointer<Float>,
@@ -555,11 +441,6 @@ final class SystemAudioTap {
         cblas_scopy(Int32(count), src, Int32(stride), dst, 1)
     }
 
-    // MARK: - Writer thread (drains the ring to disk, off the realtime path)
-
-    /// Start the background consumer that drains `ring` into `file`. The thread holds its own
-    /// strong references to `file`/`ring` for its lifetime and exits when `writerShouldStop` is set
-    /// AND the ring has been fully drained.
     private func startWriterThread(file: AVAudioFile, writeFormat: AVAudioFormat, ring: FloatRingBuffer) {
         let chunkFrames = 4096
         let thread = Thread { [weak self] in
@@ -580,9 +461,9 @@ final class SystemAudioTap {
                         self?.onFatalError?(error)
                     }
                 } else if stopRequested {
-                    break               // empty AND asked to stop -> fully drained
+                    break
                 } else {
-                    usleep(5_000)        // 5 ms; the ring holds several seconds of headroom
+                    usleep(5_000)
                 }
             }
         }
@@ -592,8 +473,6 @@ final class SystemAudioTap {
         thread.start()
     }
 
-    /// Signal the writer to finish draining and block until it exits. Safe to call when no writer
-    /// is running. The writer never takes `self.lock`, so calling this under `lock` cannot deadlock.
     private func stopWriterThreadAndDrain() {
         writerShouldStop.withLock { $0 = true }
         if let thread = writerThread {
@@ -601,8 +480,6 @@ final class SystemAudioTap {
         }
         writerThread = nil
     }
-
-    // MARK: - Watchdog (macOS 26 zero-buffer regression)
 
     private func startWatchdog() {
         let timer = DispatchSource.makeTimerSource(queue: watchdogQueue)
@@ -620,7 +497,6 @@ final class SystemAudioTap {
     }
 
     private func watchdogTick() {
-        // Don't intervene while paused (silence is expected) or mid-rebuild.
         if paused.withLock({ $0 }) { return }
 
         lock.lock()
@@ -629,8 +505,6 @@ final class SystemAudioTap {
         lock.unlock()
         guard isRunning else { return }
 
-        // Only rebuild if the system output device is actually doing something — otherwise silence
-        // is legitimately silence and a rebuild would be pointless churn.
         guard let outDevice, Self.deviceIsRunningSomewhere(outDevice) else { return }
 
         let now = mach_absolute_time()
@@ -644,14 +518,10 @@ final class SystemAudioTap {
         }
     }
 
-    /// Read the current default output device (caller holds `lock`; just a convenience wrapper that
-    /// swallows errors so the watchdog stays quiet).
     private func lock_currentOutputDeviceLocked() -> AudioObjectID? {
         return try? Self.defaultSystemOutputDevice()
     }
 
-    /// Tear down and rebuild BOTH the tap and the aggregate, reinstall the IOProc, and keep writing
-    /// to the SAME file. Rebuilding only one is insufficient per the regression report.
     private func rebuildTapAndAggregate() {
         lock.lock()
 
@@ -661,19 +531,13 @@ final class SystemAudioTap {
         }
         rebuilding = true
 
-        // Destroy existing Core Audio objects (leaves `file` untouched).
         destroyTapAndAggregateLocked()
 
-        // Fresh tap UUID for the rebuild.
         tapUUID = UUID()
 
         do {
             let built = try buildTapAndAggregateLocked()
-            // Keep writing in the original write format; only update the realtime wrap format /
-            // sample rate if the tap renegotiated. Note: if the sample rate changed we keep the
-            // original write file format (mono float) but the incoming buffers are wrapped with the
-            // new tapFormat — AVAudioFile will write whatever frames we hand it, so a rate change
-            // mid-file produces a benign tempo seam rather than a crash.
+
             self.tapFormat = built.tapFormat
             if writeFormat == nil {
                 self.writeFormat = AVAudioFormat(
@@ -687,13 +551,11 @@ final class SystemAudioTap {
         } catch {
             rebuilding = false
             lock.unlock()
-            // Rebuild failed: this is fatal for the desktop stream. Surface it; the mic recording
-            // and raw desktop-so-far file remain intact.
+
             onFatalError?(error)
             return
         }
 
-        // Reset watchdog clocks so we give the fresh tap a fair window before judging it again.
         let now = mach_absolute_time()
         lastLoudHostTime.withLock { $0 = now }
         lastCallbackHostTime.withLock { $0 = now }
@@ -702,9 +564,6 @@ final class SystemAudioTap {
         lock.unlock()
     }
 
-    // MARK: - Core Audio property helpers
-
-    /// Read the default system output device ID.
     private static func defaultSystemOutputDevice() throws -> AudioObjectID {
         var address = AudioObjectPropertyAddress(
             mSelector: kAudioHardwarePropertyDefaultSystemOutputDevice,
@@ -723,14 +582,13 @@ final class SystemAudioTap {
         return deviceID
     }
 
-    /// Read a device's UID string.
     private static func deviceUID(_ deviceID: AudioObjectID) throws -> String {
         var address = AudioObjectPropertyAddress(
             mSelector: kAudioDevicePropertyDeviceUID,
             mScope: kAudioObjectPropertyScopeGlobal,
             mElement: kAudioObjectPropertyElementMain
         )
-        // CoreAudio writes a retained CFString into the pointer; bridge it to Swift afterward.
+
         var cfUID: Unmanaged<CFString>?
         var size = UInt32(MemoryLayout<Unmanaged<CFString>?>.size)
         let status = AudioObjectGetPropertyData(deviceID, &address, 0, nil, &size, &cfUID)
@@ -740,7 +598,6 @@ final class SystemAudioTap {
         return uid as String
     }
 
-    /// Read `kAudioTapPropertyFormat` ('tfmt') and build an `AVAudioFormat`.
     private static func tapStreamFormat(_ tapID: AudioObjectID) throws -> AVAudioFormat {
         var address = AudioObjectPropertyAddress(
             mSelector: kAudioTapPropertyFormat,
@@ -760,7 +617,6 @@ final class SystemAudioTap {
         return format
     }
 
-    /// Is the device currently running an IO stream somewhere on the system?
     private static func deviceIsRunningSomewhere(_ deviceID: AudioObjectID) -> Bool {
         var address = AudioObjectPropertyAddress(
             mSelector: kAudioDevicePropertyDeviceIsRunningSomewhere,

@@ -1,19 +1,5 @@
 import SwiftUI
 
-/// The content of the dedicated **Preferences window**.
-///
-/// The window itself is an AppKit `NSWindow` hosting this view — see
-/// `PreferencesWindowController` for why we don't use SwiftUI's `Settings` scene.
-/// Everything that used to live in the menu-bar panel's inline "Settings"
-/// disclosure now lives here, opened with ⌘, or the panel's "Settings…" button:
-///   - **General** — your name (transcript labelling) + silence auto-stop.
-///   - **Pipeline** — pasta do repo transcribe, contexto e auto-processamento.
-///
-/// Grouped `Form`s in a `TabView` give the standard macOS System-Settings look,
-/// and the window has far more room than the 340-pt menu-bar panel (the prompt
-/// editor in particular is finally comfortable to edit). The `TabView` is given a
-/// single fixed size so the host window doesn't clip the taller (Transcription) tab
-/// or leave the window resizing as you switch tabs.
 struct PreferencesView: View {
     var body: some View {
         TabView {
@@ -26,8 +12,6 @@ struct PreferencesView: View {
         .frame(width: 480, height: 560)
     }
 }
-
-// MARK: - General
 
 private struct GeneralPreferences: View {
     @Environment(RecorderModel.self) private var model
@@ -81,13 +65,9 @@ private struct GeneralPreferences: View {
     }
 }
 
-// MARK: - Pipeline
-
 private struct TranscriptionPreferences: View {
     @Environment(RecorderModel.self) private var model
 
-    /// Working copy for the path field; committed on blur so UserDefaults is
-    /// not rewritten on every keystroke.
     @State private var dirDraft = ""
     @FocusState private var dirFocused: Bool
 

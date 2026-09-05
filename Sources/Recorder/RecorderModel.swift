@@ -2,79 +2,63 @@ import Foundation
 import Observation
 import AppKit
 
-/// Owns every component and wires their callbacks. The model is @MainActor;
-/// audio-thread callbacks hop to main via DispatchQueue.main.async before touching state.
 @MainActor
 @Observable
 final class RecorderModel {
-
-    // MARK: - Observable UI state
-
     var state: RecorderState = .idle
-    var desktopLevel: Float = 0      // 0..1 meter (LEFT / desktop)
-    var micLevel: Float = 0          // 0..1 meter (RIGHT / mic)
+    var desktopLevel: Float = 0
+    var micLevel: Float = 0
     var meetings: [Meeting] = []
     var currentSession: RecordingSession? = nil
     var elapsed: TimeInterval = 0
     var statusMessage: String? = nil
 
-    // MARK: - Persisted preferences (mirrored to UserDefaults via Preferences)
-
-    /// Your name — labels the local (mic / right-channel) voice in transcripts.
-    /// Empty = omit. Replaces the old hardcoded speaker name.
     var localSpeakerName: String = "" {
         didSet { Preferences.speakerName = localSpeakerName }
     }
-    /// Auto-stop after this many seconds of two-channel silence.
+
     var silenceTimeout: TimeInterval = 300 {
         didSet { Preferences.silenceTimeout = silenceTimeout }
     }
-    /// dBFS below which a channel is considered silent.
+
     var silenceThresholdDB: Float = -50 {
         didSet { Preferences.silenceThresholdDB = silenceThresholdDB }
     }
-    /// Whether silence auto-stop runs at all.
+
     var silenceAutoStopEnabled: Bool = true {
         didSet { Preferences.silenceAutoStop = silenceAutoStopEnabled }
     }
-    /// Whether to run the pipeline automatically after a recording is saved.
-    /// Off by default: the pipeline publishes to Notion, which is a bigger
-    /// side effect than the local transcript file this replaced.
+
     var autoProcess: Bool = false {
         didSet { Preferences.autoProcess = autoProcess }
     }
-    /// Directory of the `transcribe` repo.
+
     var pipelineDir: String = Preferences.pipelineDir {
         didSet {
             Preferences.pipelineDir = pipelineDir
             refreshContexts()
         }
     }
-    /// Contexts offered in the picker — the subfolders of the pipeline's media root.
+
     var availableContexts: [String] = []
-    /// Context that the next recording will be filed under.
+
     var selectedContext: String = "" {
         didSet { Preferences.lastContext = selectedContext }
     }
 
-    // Pipeline (post-save).
     var transcriptionState: TranscriptionState = .idle
     var lastTranscriptText: String? = nil
     var lastTranscriptURL: URL? = nil
-    /// Whether the pipeline can actually be invoked (docker + compose present).
+
     var pipelineIsReady: Bool = false
-    /// Result of the last run, in a form the panel can show: the meeting
-    /// title and a link, instead of the raw page id the log carries.
+
     var lastOutcome: PipelineRunner.Outcome? = nil
-    /// Duration of the recording waiting to be processed, for the panel.
+
     var pendingDuration: TimeInterval = 0
-    /// Context the pending recording was saved under.
+
     var pendingContext: String = ""
 
-    /// The most recent recordings on disk (loaded at launch + after changes).
     var recentRecordings: [RecordingEntry] = []
-
-    // MARK: - Heavy / audio objects (not observation-tracked)
 
     @ObservationIgnored private let tap = SystemAudioTap()
     @ObservationIgnored private let mic = MicCapture()
@@ -85,35 +69,26 @@ final class RecorderModel {
     @ObservationIgnored private var elapsedTimer: Timer?
     @ObservationIgnored private var recordingStartedAt: Date?
 
-    /// The meeting (if any) the current recording is attached to — kept so its
-    /// title + attendees are available as transcription context at save time.
     @ObservationIgnored private var activeMeeting: Meeting?
 
-    /// Everything needed to (re)run a transcription, captured at save time.
     private struct PendingTranscription {
         let audioURL: URL
         let folderURL: URL
         let meetingTitle: String?
         let attendees: [String]
         let startedAt: Date
-        /// Chosen when the recording was saved, so a retry never re-asks.
+
         let context: String
     }
     @ObservationIgnored private var lastTranscription: PendingTranscription?
 
-    // MARK: - Lifecycle
-
     func onAppear() {
-        // Load persisted preferences first so the UI reflects them immediately.
         loadPreferences()
 
-        // Which contexts exist, and whether the pipeline can be invoked at all.
         refreshContexts()
 
-        // Load prior recordings from disk so they survive restarts.
         refreshRecordings()
 
-        // Request permissions concurrently, then load meetings.
         Task { @MainActor in
             _ = await MicCapture.requestAccess()
         }
@@ -125,13 +100,11 @@ final class RecorderModel {
             await notifications.requestAuthorization()
         }
 
-        // Refetch meetings on calendar changes.
         calendar.onChange = { [weak self] in
-            // onChange is delivered on main (CalendarAccess is @MainActor).
+
             self?.refreshMeetings()
         }
 
-        // A user tapping "Stop Recording" in the meeting-end notification stops + saves.
         notifications.onStopRequested = { [weak self] in
             guard let self else { return }
             if self.state != .idle {
@@ -139,7 +112,6 @@ final class RecorderModel {
             }
         }
 
-        // Surface fatal capture errors to the UI.
         tap.onFatalError = { [weak self] error in
             DispatchQueue.main.async {
                 self?.statusMessage = "Desktop audio error: \(error.localizedDescription)"
@@ -152,8 +124,6 @@ final class RecorderModel {
         }
     }
 
-    /// Pull persisted preferences into the observable properties. The `didSet`
-    /// write-backs are idempotent (same value in → same value out).
     private func loadPreferences() {
         localSpeakerName = Preferences.speakerName
         silenceTimeout = Preferences.silenceTimeout
@@ -163,8 +133,6 @@ final class RecorderModel {
         pipelineDir = Preferences.pipelineDir
     }
 
-    /// Whether the prompt differs from the built-in default (drives the Reset button).
-    /// Re-read the contexts from disk and whether docker is reachable.
     func refreshContexts() {
         pipelineIsReady = PipelineRunner.resolveDocker() != nil
             && FileManager.default.fileExists(
@@ -173,8 +141,7 @@ final class RecorderModel {
         let stored = Preferences.contexts
         let discovered = PipelineRunner.discoverContexts(pipelineDir: pipelineDir)
         availableContexts = stored.isEmpty ? discovered : stored
-        // Keep the previous choice when it still exists; otherwise fall back to
-        // the first context so the picker is never empty-but-required.
+
         let last = Preferences.lastContext
         if availableContexts.contains(last) {
             selectedContext = last
@@ -182,8 +149,6 @@ final class RecorderModel {
             selectedContext = availableContexts.first ?? ""
         }
     }
-
-    // MARK: - Recording control
 
     func startRecording(meeting: Meeting?) {
         guard state == .idle else { return }
@@ -199,20 +164,17 @@ final class RecorderModel {
         currentSession = session
         activeMeeting = meeting
 
-        // Clear any previous recording's transcription UI.
         transcriptionState = .idle
         lastTranscriptText = nil
         lastTranscriptURL = nil
         lastTranscription = nil
 
-        // Silence monitor (auto-stop after prolonged silence on both channels).
-        // Only armed when the user has auto-stop enabled.
         if silenceAutoStopEnabled {
             silenceMonitor = SilenceMonitor(
                 thresholdDB: silenceThresholdDB,
                 timeout: silenceTimeout,
                 onTimeout: { [weak self] in
-                    // onTimeout is invoked on MAIN per contract.
+
                     self?.saveAndStop()
                 }
             )
@@ -220,7 +182,6 @@ final class RecorderModel {
             silenceMonitor = nil
         }
 
-        // Wire level callbacks (called on audio threads -> hop to main).
         tap.onLevelDB = { [weak self] db in
             DispatchQueue.main.async {
                 guard let self else { return }
@@ -236,7 +197,6 @@ final class RecorderModel {
             }
         }
 
-        // Start both captures.
         do {
             try tap.start(writingTo: session.desktopURL)
             try mic.start(writingTo: session.micURL)
@@ -251,7 +211,6 @@ final class RecorderModel {
 
         silenceMonitor?.start()
 
-        // Schedule a meeting-end alert when recording a known meeting.
         if let meeting {
             notifications.scheduleMeetingEndAlert(at: meeting.end, meetingTitle: meeting.title)
         }
@@ -291,7 +250,6 @@ final class RecorderModel {
         state = .idle
         statusMessage = "Mixing…"
 
-        // Mix off the main actor; keep raw CAFs regardless of outcome.
         let outputURL = session.outputURL
         let desktopURL = session.desktopURL
         let micURL = session.micURL
@@ -319,9 +277,7 @@ final class RecorderModel {
                         startedAt: startedAt,
                         context: chosenContext
                     )
-                    // O meta.json e escrito SEMPRE, mesmo sem auto-process: e o
-                    // que preserva a escolha de contexto para quando a pipeline
-                    // for acionada depois, pelo botao.
+
                     try? PipelineRunner.writeMeta(
                         folderURL: folderURL,
                         context: PipelineRunner.Context(
@@ -336,8 +292,6 @@ final class RecorderModel {
                         self.statusMessage = "Saved \(outputURL.lastPathComponent)"
                         self.startTranscription(pending)
                     } else {
-                        // Pipeline manual: a gravacao fica pronta e o botao
-                        // "Processar" no painel a envia quando voce quiser.
                         self.lastTranscription = pending
                         self.pendingContext = chosenContext
                         self.transcriptionState = .idle
@@ -389,10 +343,6 @@ final class RecorderModel {
         meetings = calendar.meetingsAroundNow(now)
     }
 
-    /// The meeting currently in progress, if any. All-day events are already
-    /// excluded from `meetings`, so this only matches timed meetings. Used as the
-    /// default target for the main Record button so recording while you're in a
-    /// meeting auto-tags it (folder name + end alert + transcription context).
     var currentMeeting: Meeting? {
         let now = Date()
         return meetings.first(where: { $0.isInProgress(now) })
@@ -401,8 +351,6 @@ final class RecorderModel {
     func quit() {
         NSApp.terminate(nil)
     }
-
-    // MARK: - Helpers
 
     private func startElapsedTimer(from start: Date) {
         recordingStartedAt = start
@@ -437,18 +385,13 @@ final class RecorderModel {
         elapsed = 0
     }
 
-    // MARK: - Pipeline
-
-    /// Whether there is a saved recording waiting to be sent to the pipeline.
     var canProcessNow: Bool {
         lastTranscription != nil && transcriptionState != .running
     }
 
-    /// Send the last saved recording to the pipeline — the panel's button.
     func processLastRecording() {
         guard let pending = lastTranscription else { return }
-        // Recria com o contexto atual do picker: entre salvar e clicar, voce
-        // pode ter percebido que escolheu a pasta errada.
+
         startTranscription(PendingTranscription(
             audioURL: pending.audioURL,
             folderURL: pending.folderURL,
@@ -459,9 +402,6 @@ final class RecorderModel {
         ))
     }
 
-    /// Re-run the pipeline on the last recording (after a failure).
-    ///
-    /// Reuses the context chosen at save time, so a retry never asks again.
     func retryTranscription() {
         guard let pending = lastTranscription else { return }
         startTranscription(pending)
@@ -503,14 +443,10 @@ final class RecorderModel {
 
         Task { [weak self] in
             do {
-                // Fora da main actor: a pipeline leva minutos (Whisper + resumo
-                // + Notion) e travaria a UI inteira aqui.
                 let output = try await Task.detached(priority: .utility) {
                     try await runner.run(folderURL: pending.folderURL, context: context)
                 }.value
-                // O log da rodada fica ao lado da gravação: é o que explica por
-                // que uma ata saiu com determinado título ou foi marcada
-                // sem_fala, sem precisar reproduzir a execução.
+
                 let logURL = pending.folderURL.appendingPathComponent("pipeline.log")
                 try? output.write(to: logURL, atomically: true, encoding: .utf8)
                 await MainActor.run {
@@ -535,7 +471,6 @@ final class RecorderModel {
         }
     }
 
-    /// Copy the transcript text to the clipboard.
     func copyTranscriptText() {
         guard let text = lastTranscriptText else { return }
         let pasteboard = NSPasteboard.general
@@ -544,7 +479,6 @@ final class RecorderModel {
         statusMessage = "Transcript text copied"
     }
 
-    /// Copy the transcript *file* to the clipboard (paste into Finder / Mail / etc.).
     func copyTranscriptFile() {
         guard let url = lastTranscriptURL else { return }
         let pasteboard = NSPasteboard.general
@@ -553,27 +487,21 @@ final class RecorderModel {
         statusMessage = "Transcript file copied"
     }
 
-    /// Reveal the transcript in Finder.
     func revealTranscript() {
         guard let url = lastTranscriptURL else { return }
         NSWorkspace.shared.activateFileViewerSelecting([url])
     }
 
-    // MARK: - Recordings library
-
-    /// Reload the recent-recordings list from disk.
     func refreshRecordings() {
         recentRecordings = RecordingsLibrary.recent(limit: 4)
     }
 
-    /// Transcribe (or re-transcribe) an existing recording's audio.
     func transcribeExisting(_ entry: RecordingEntry) {
         guard let audio = entry.audioURL else {
             statusMessage = "No audio.m4a to transcribe in that folder."
             return
         }
-        // Uma gravacao antiga pode ja ter um meta.json com o contexto
-        // escolhido na epoca; respeita-lo evita refilar no lugar errado.
+
         let ctx = RecorderModel.contextFromMeta(entry.folderURL) ?? selectedContext
         startTranscription(PendingTranscription(
             audioURL: audio,
@@ -585,7 +513,6 @@ final class RecorderModel {
         ))
     }
 
-    /// Put a file on the clipboard (paste into Finder / Mail / …).
     func copyFileToPasteboard(_ url: URL) {
         let pasteboard = NSPasteboard.general
         pasteboard.clearContents()
@@ -593,7 +520,6 @@ final class RecorderModel {
         statusMessage = "Copied \(url.lastPathComponent)"
     }
 
-    /// Put a text file's contents on the clipboard.
     func copyTextOfFile(_ url: URL) {
         guard let text = try? String(contentsOf: url, encoding: .utf8) else {
             statusMessage = "Could not read \(url.lastPathComponent)"
@@ -605,20 +531,16 @@ final class RecorderModel {
         statusMessage = "Copied text of \(url.lastPathComponent)"
     }
 
-    /// Reveal an arbitrary file/folder in Finder.
     func reveal(_ url: URL) {
         NSWorkspace.shared.activateFileViewerSelecting([url])
     }
 
-    /// Open ~/Documents/Recordings in Finder (creating it if needed).
     func openRecordingsFolder() {
         guard let root = RecordingsLibrary.recordingsRoot() else { return }
         try? FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         NSWorkspace.shared.open(root)
     }
 
-    /// Wrap the model's Markdown with a small header (title / date / attendees).
-    /// Context recorded in a folder's meta.json, if any.
     private static func contextFromMeta(_ folderURL: URL) -> String? {
         let url = folderURL.appendingPathComponent("meta.json")
         guard let data = try? Data(contentsOf: url),
