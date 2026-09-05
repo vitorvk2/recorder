@@ -13,13 +13,15 @@ enum Preferences {
         static let silenceTimeout     = "silenceTimeoutSeconds"
         static let silenceThresholdDB = "silenceThresholdDB"
         static let silenceAutoStop    = "silenceAutoStopEnabled"
-        static let autoTranscribe     = "autoTranscribeAfterSave"
-        static let promptTemplate     = "geminiPromptTemplate"
+        static let autoProcess        = "autoProcessAfterSave"
+        static let pipelineDir        = "pipelineDirectory"
+        static let contexts           = "pipelineContexts"
+        static let lastContext        = "lastUsedContext"
     }
 
-    /// Your name — used only as transcription context to label the local voice
-    /// (the microphone / right channel) when guessing who said what. Empty means
-    /// "don't name the local speaker". There is intentionally NO baked-in default.
+    /// Your name — passed to the pipeline so the summary can label the local
+    /// voice (the microphone / right channel) when guessing who said what.
+    /// Empty means "don't name the local speaker".
     static var speakerName: String {
         get { defaults.string(forKey: Key.speakerName) ?? "" }
         set { defaults.set(newValue, forKey: Key.speakerName) }
@@ -43,17 +45,34 @@ enum Preferences {
         set { defaults.set(newValue, forKey: Key.silenceAutoStop) }
     }
 
-    /// Whether to transcribe automatically once a recording is saved. Default true.
-    static var autoTranscribe: Bool {
-        get { defaults.object(forKey: Key.autoTranscribe) == nil ? true : defaults.bool(forKey: Key.autoTranscribe) }
-        set { defaults.set(newValue, forKey: Key.autoTranscribe) }
+    /// Whether to run the pipeline automatically once a recording is saved.
+    ///
+    /// Defaults to **false**, unlike the Gemini flow this replaced: the pipeline
+    /// publishes to Notion, so firing it unattended on every recording is a
+    /// bigger side effect than writing a local transcript file.
+    static var autoProcess: Bool {
+        get { defaults.bool(forKey: Key.autoProcess) }
+        set { defaults.set(newValue, forKey: Key.autoProcess) }
     }
 
-    /// User-customized Gemini transcription prompt. **Empty means "use the built-in
-    /// default"** — we store empty rather than a copy of the default so that future
-    /// improvements to the default prompt still reach users who never customized it.
-    static var promptTemplate: String {
-        get { defaults.string(forKey: Key.promptTemplate) ?? "" }
-        set { defaults.set(newValue, forKey: Key.promptTemplate) }
+    /// Directory of the `transcribe` repo (where docker-compose.yml lives).
+    static var pipelineDir: String {
+        get {
+            defaults.string(forKey: Key.pipelineDir)
+                ?? (NSHomeDirectory() as NSString).appendingPathComponent("Documents/home/transcribe")
+        }
+        set { defaults.set(newValue, forKey: Key.pipelineDir) }
+    }
+
+    /// Contexts offered in the picker. Empty means "discover from the media root".
+    static var contexts: [String] {
+        get { defaults.stringArray(forKey: Key.contexts) ?? [] }
+        set { defaults.set(newValue, forKey: Key.contexts) }
+    }
+
+    /// Context used on the previous recording, pre-selected next time.
+    static var lastContext: String {
+        get { defaults.string(forKey: Key.lastContext) ?? "" }
+        set { defaults.set(newValue, forKey: Key.lastContext) }
     }
 }

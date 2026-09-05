@@ -25,6 +25,7 @@ import os
 /// `AVAudioFile`.
 final class SystemAudioTap {
 
+
     // MARK: - Public callbacks (called on audio / arbitrary threads)
 
     /// dBFS per buffer (throttled to ~10-20 Hz). Called on the audio thread.
@@ -130,6 +131,13 @@ final class SystemAudioTap {
     /// If output is audibly running but the tap delivers ~silence for this long, rebuild.
     private let watchdogSilenceThreshold: TimeInterval = 3.0
     private var rebuilding = false
+    /// Quantas vezes o watchdog reconstruiu tap + aggregate nesta gravacao.
+    ///
+    /// Cada reconstrucao derruba e recria um aggregate que contem o
+    /// dispositivo de saida, o que interrompe o audio AO VIVO por um
+    /// instante. Sem esse numero nao da para separar "o macOS 26 esta com o
+    /// bug do tap zerado" de "o audio de origem ja estava ruim".
+    private(set) var rebuildCount = 0
 
     // Throttle the meter callback to ~15 Hz.
     private var lastMeterPostHostTime: UInt64 = 0
@@ -228,6 +236,8 @@ final class SystemAudioTap {
         }
 
         started = true
+
+        rebuildCount = 0
 
         // Prime watchdog timestamps to "now".
         let now = mach_absolute_time()
@@ -491,27 +501,58 @@ final class SystemAudioTap {
             firstHostTime = inputTime.pointee.mHostTime
         }
 
+        // O layout importa: kAudioTapPropertyFormat costuma reportar estereo
+        // INTERCALADO (flags sem kAudioFormatFlagIsNonInterleaved, bytesPerFrame
+        // = 8). Nesse caso `floatChannelData` devolve UM ponteiro com L,R,L,R e
+        // `channelData[1]` esta fora dos limites. Tratar isso como nao
+        // intercalado copiava metade do buffer alternando canais: audio a meia
+        // velocidade, cortado, com um salto em cada fronteira de bloco.
         if channelCount <= 1 {
-            // Already mono: enqueue straight from the input buffer.
+            // Ja mono: enfileira direto do buffer de entrada.
             ring.write(channelData[0], count: Int(frameCount))
         } else if let scratch = self.scratch {
-            // Average all channels into mono, in scratch-sized chunks (IO buffers are tiny, so
-            // this loop runs once in practice).
+            let interleaved = tapFormat.isInterleaved
             let total = Int(frameCount)
             var offset = 0
             while offset < total {
                 let chunk = min(total - offset, scratchCapacity)
                 let cn = vDSP_Length(chunk)
-                memcpy(scratch, channelData[0] + offset, chunk * MemoryLayout<Float>.stride)
-                for ch in 1..<channelCount {
-                    vDSP_vadd(scratch, 1, channelData[ch] + offset, 1, scratch, 1, cn)
+
+                if interleaved {
+                    // Um buffer so; canal `ch` e acessado com passo `channelCount`.
+                    let base = channelData[0] + offset * channelCount
+                    memcpy_stride(dst: scratch, src: base, stride: channelCount, count: chunk)
+                    for ch in 1..<channelCount {
+                        vDSP_vadd(scratch, 1, base + ch, vDSP_Stride(channelCount),
+                                  scratch, 1, cn)
+                    }
+                } else {
+                    // Um buffer por canal, todos com passo 1.
+                    memcpy(scratch, channelData[0] + offset, chunk * MemoryLayout<Float>.stride)
+                    for ch in 1..<channelCount {
+                        vDSP_vadd(scratch, 1, channelData[ch] + offset, 1, scratch, 1, cn)
+                    }
                 }
+
                 var scale = 1.0 / Float(channelCount)
                 vDSP_vsmul(scratch, 1, &scale, scratch, 1, cn)
                 ring.write(scratch, count: chunk)
                 offset += chunk
             }
         }
+    }
+
+    /// Copia `count` amostras de um buffer intercalado (passo `stride`) para um
+    /// destino contiguo. Usa vDSP para ficar sem laco em Swift no caminho
+    /// realtime; nao aloca nada.
+    @inline(__always)
+    private func memcpy_stride(
+        dst: UnsafeMutablePointer<Float>,
+        src: UnsafePointer<Float>,
+        stride: Int,
+        count: Int
+    ) {
+        cblas_scopy(Int32(count), src, Int32(stride), dst, 1)
     }
 
     // MARK: - Writer thread (drains the ring to disk, off the realtime path)
@@ -598,6 +639,7 @@ final class SystemAudioTap {
         let elapsedSeconds = Double(elapsedNanos) / 1_000_000_000.0
 
         if elapsedSeconds >= watchdogSilenceThreshold {
+            rebuildCount += 1
             rebuildTapAndAggregate()
         }
     }

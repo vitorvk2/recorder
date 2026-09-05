@@ -7,7 +7,7 @@ import SwiftUI
 /// Everything that used to live in the menu-bar panel's inline "Settings"
 /// disclosure now lives here, opened with ⌘, or the panel's "Settings…" button:
 ///   - **General** — your name (transcript labelling) + silence auto-stop.
-///   - **Transcription** — Gemini API key, auto-transcribe, and the editable prompt.
+///   - **Pipeline** — pasta do repo transcribe, contexto e auto-processamento.
 ///
 /// Grouped `Form`s in a `TabView` give the standard macOS System-Settings look,
 /// and the window has far more room than the 340-pt menu-bar panel (the prompt
@@ -81,148 +81,106 @@ private struct GeneralPreferences: View {
     }
 }
 
-// MARK: - Transcription
+// MARK: - Pipeline
 
 private struct TranscriptionPreferences: View {
     @Environment(RecorderModel.self) private var model
 
-    /// Draft text for the API-key SecureField (never stored in the model).
-    @State private var keyDraft = ""
-    /// Reveal the key field even when a key is already stored (for "Replace").
-    @State private var showKeyField = false
-    /// Working copy for the prompt editor; committed to the model on blur / close
-    /// so we don't rewrite UserDefaults on every keystroke.
-    @State private var promptDraft = ""
-    @FocusState private var promptFocused: Bool
+    /// Working copy for the path field; committed on blur so UserDefaults is
+    /// not rewritten on every keystroke.
+    @State private var dirDraft = ""
+    @FocusState private var dirFocused: Bool
 
     var body: some View {
         @Bindable var model = model
         Form {
             Section {
-                apiKeyRow
-            } header: {
-                Text("Gemini API key")
-            } footer: {
-                Text("Stored in the macOS Keychain — never written to disk in plaintext.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            }
-
-            Section {
-                Toggle("Transcribe automatically with Gemini after saving", isOn: $model.autoTranscribe)
-                    .disabled(!model.apiKeyIsSet)
-                Text(model.apiKeyIsSet
-                     ? "Each recording is transcribed as soon as it's saved."
-                     : "Add an API key above to enable transcription.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            } header: {
-                Text("Automatic transcription")
-            }
-
-            Section {
-                promptEditor
-            } header: {
-                Text("Prompt")
-            }
-        }
-        .formStyle(.grouped)
-        .onAppear { promptDraft = model.promptTemplate }
-        .onDisappear { commitPromptDraft() }
-    }
-
-    // MARK: API key
-
-    @ViewBuilder
-    private var apiKeyRow: some View {
-        if model.apiKeyIsSet && !showKeyField {
-            HStack(spacing: 8) {
-                Label("Stored in Keychain", systemImage: "key.fill")
-                    .foregroundStyle(.secondary)
-                Spacer()
-                Button("Replace") { showKeyField = true }
-                Button("Remove", role: .destructive) { model.clearAPIKey() }
-            }
-        } else {
-            VStack(alignment: .leading, spacing: 6) {
-                if !model.apiKeyIsSet {
-                    Text("Paste a Google AI Studio key to enable transcription.")
+                HStack(spacing: 8) {
+                    TextField("~/Documents/home/transcribe", text: $dirDraft)
+                        .textFieldStyle(.roundedBorder)
+                        .focused($dirFocused)
+                        .onSubmit { commitDir() }
+                    Button("Escolher…") { chooseDirectory() }
+                }
+                HStack(spacing: 6) {
+                    Image(systemName: model.pipelineIsReady
+                          ? "checkmark.circle.fill" : "exclamationmark.triangle.fill")
+                        .foregroundStyle(model.pipelineIsReady ? .green : .orange)
+                    Text(model.pipelineIsReady
+                         ? "Docker e docker-compose.yml encontrados."
+                         : "Docker não encontrado ou a pasta não tem docker-compose.yml.")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
-                HStack(spacing: 6) {
-                    SecureField("AIza…", text: $keyDraft)
-                        .textFieldStyle(.roundedBorder)
-                    Button("Save") {
-                        model.saveAPIKey(keyDraft)
-                        keyDraft = ""
-                        showKeyField = false
-                    }
-                    .disabled(keyDraft.trimmingCharacters(in: .whitespaces).isEmpty)
-                    if showKeyField {
-                        Button("Cancel") {
-                            keyDraft = ""
-                            showKeyField = false
-                        }
-                    }
-                }
+            } header: {
+                Text("Pipeline local")
+            } footer: {
+                Text("Pasta do repo transcribe. O processamento roda todo aqui: Whisper transcreve, o modelo resume e a ata vai para o Notion.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
             }
-        }
-    }
 
-    // MARK: Prompt editor
-
-    private var promptEditor: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            (Text("The placeholders ")
-             + Text("{{CHANNEL_LAYOUT}}").bold().monospaced()
-             + Text(" and ")
-             + Text("{{CONTEXT}}").bold().monospaced()
-             + Text(" are filled in automatically with the stereo layout, your name, and the meeting's title + attendees."))
-                .font(.caption)
-                .foregroundStyle(.secondary)
-                .fixedSize(horizontal: false, vertical: true)
-
-            TextEditor(text: $promptDraft)
-                .font(.system(.caption, design: .monospaced))
-                .frame(minHeight: 260)
-                .focused($promptFocused)
-                .padding(4)
-                .overlay(
-                    RoundedRectangle(cornerRadius: 6)
-                        .stroke(Color.secondary.opacity(0.3), lineWidth: 1)
-                )
-                .onChange(of: promptFocused) { _, focused in
-                    if !focused { commitPromptDraft() }
-                }
-
-            HStack {
-                if model.promptTemplateIsCustomized {
-                    Label("Customized", systemImage: "pencil")
+            Section {
+                if model.availableContexts.isEmpty {
+                    Text("Nenhuma subpasta em \(PipelineRunner.mediaRoot(pipelineDir: model.pipelineDir).path). Crie uma (ex.: Funcional) para ela aparecer aqui.")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 } else {
-                    Text("Using the built-in prompt.")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
+                    Picker("Contexto padrão", selection: $model.selectedContext) {
+                        ForEach(model.availableContexts, id: \.self) { Text($0).tag($0) }
+                    }
                 }
-                Spacer()
-                Button("Reset to default") {
-                    model.resetPromptTemplate()
-                    promptDraft = model.promptTemplate
-                }
-                .disabled(!model.promptTemplateIsCustomized)
+                Button("Recarregar contextos") { model.refreshContexts() }
+            } header: {
+                Text("Contexto")
+            } footer: {
+                Text("As subpastas da raiz de mídia. É o contexto que decide onde a ata é organizada no Notion — criar uma pasta nova já a faz aparecer, sem configurar nada.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
+            Section {
+                Toggle("Acionar a pipeline automaticamente ao salvar", isOn: $model.autoProcess)
+                    .disabled(!model.pipelineIsReady)
+                Text(model.autoProcess
+                     ? "Cada gravação é processada e publicada no Notion assim que você salva."
+                     : "A gravação fica pronta e o botão Processar, no painel, a envia quando você quiser.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            } header: {
+                Text("Automático")
+            } footer: {
+                Text("Desligado por padrão: a pipeline publica no Notion, e isso é um efeito maior do que gerar um arquivo local.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
             }
         }
+        .formStyle(.grouped)
+        .onAppear { dirDraft = model.pipelineDir }
+        .onChange(of: dirFocused) { _, focused in if !focused { commitDir() } }
+        .onDisappear { commitDir() }
     }
 
-    /// Push the editor's working copy into the model (and thus UserDefaults).
-    /// A blank draft normalizes back to the default so the "Customized" state and
-    /// the actual transcription prompt never disagree.
-    private func commitPromptDraft() {
-        let trimmed = promptDraft.trimmingCharacters(in: .whitespacesAndNewlines)
-        let resolved = trimmed.isEmpty ? GeminiTranscriber.defaultPromptTemplate : promptDraft
-        if model.promptTemplate != resolved { model.promptTemplate = resolved }
-        if promptDraft != resolved { promptDraft = resolved }
+    private func commitDir() {
+        let trimmed = dirDraft.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else {
+            dirDraft = model.pipelineDir
+            return
+        }
+        let expanded = (trimmed as NSString).expandingTildeInPath
+        if model.pipelineDir != expanded { model.pipelineDir = expanded }
+        dirDraft = expanded
+    }
+
+    private func chooseDirectory() {
+        let panel = NSOpenPanel()
+        panel.canChooseDirectories = true
+        panel.canChooseFiles = false
+        panel.allowsMultipleSelection = false
+        panel.directoryURL = URL(fileURLWithPath: model.pipelineDir)
+        if panel.runModal() == .OK, let url = panel.url {
+            model.pipelineDir = url.path
+            dirDraft = url.path
+        }
     }
 }

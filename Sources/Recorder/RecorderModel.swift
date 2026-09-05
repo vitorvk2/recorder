@@ -37,26 +37,39 @@ final class RecorderModel {
     var silenceAutoStopEnabled: Bool = true {
         didSet { Preferences.silenceAutoStop = silenceAutoStopEnabled }
     }
-    /// Whether to transcribe automatically after a recording is saved.
-    var autoTranscribe: Bool = true {
-        didSet { Preferences.autoTranscribe = autoTranscribe }
+    /// Whether to run the pipeline automatically after a recording is saved.
+    /// Off by default: the pipeline publishes to Notion, which is a bigger
+    /// side effect than the local transcript file this replaced.
+    var autoProcess: Bool = false {
+        didSet { Preferences.autoProcess = autoProcess }
     }
-    /// Editable Gemini prompt. Holds the *effective* text (built-in default until
-    /// the user customizes it). Persisted as empty when it matches the default so
-    /// default-prompt improvements still propagate (see `Preferences.promptTemplate`).
-    var promptTemplate: String = GeminiTranscriber.defaultPromptTemplate {
+    /// Directory of the `transcribe` repo.
+    var pipelineDir: String = Preferences.pipelineDir {
         didSet {
-            Preferences.promptTemplate =
-                (promptTemplate == GeminiTranscriber.defaultPromptTemplate) ? "" : promptTemplate
+            Preferences.pipelineDir = pipelineDir
+            refreshContexts()
         }
     }
+    /// Contexts offered in the picker — the subfolders of the pipeline's media root.
+    var availableContexts: [String] = []
+    /// Context that the next recording will be filed under.
+    var selectedContext: String = "" {
+        didSet { Preferences.lastContext = selectedContext }
+    }
 
-    // Transcription (post-save).
+    // Pipeline (post-save).
     var transcriptionState: TranscriptionState = .idle
     var lastTranscriptText: String? = nil
     var lastTranscriptURL: URL? = nil
-    /// Whether a Gemini API key is available in the Keychain.
-    var apiKeyIsSet: Bool = false
+    /// Whether the pipeline can actually be invoked (docker + compose present).
+    var pipelineIsReady: Bool = false
+    /// Result of the last run, in a form the panel can show: the meeting
+    /// title and a link, instead of the raw page id the log carries.
+    var lastOutcome: PipelineRunner.Outcome? = nil
+    /// Duration of the recording waiting to be processed, for the panel.
+    var pendingDuration: TimeInterval = 0
+    /// Context the pending recording was saved under.
+    var pendingContext: String = ""
 
     /// The most recent recordings on disk (loaded at launch + after changes).
     var recentRecordings: [RecordingEntry] = []
@@ -67,7 +80,6 @@ final class RecorderModel {
     @ObservationIgnored private let mic = MicCapture()
     @ObservationIgnored private let calendar = CalendarAccess()
     @ObservationIgnored private let notifications = NotificationManager()
-    @ObservationIgnored private let transcriber = GeminiTranscriber()
     @ObservationIgnored private var silenceMonitor: SilenceMonitor?
 
     @ObservationIgnored private var elapsedTimer: Timer?
@@ -84,6 +96,8 @@ final class RecorderModel {
         let meetingTitle: String?
         let attendees: [String]
         let startedAt: Date
+        /// Chosen when the recording was saved, so a retry never re-asks.
+        let context: String
     }
     @ObservationIgnored private var lastTranscription: PendingTranscription?
 
@@ -93,15 +107,8 @@ final class RecorderModel {
         // Load persisted preferences first so the UI reflects them immediately.
         loadPreferences()
 
-        // Seed the Keychain from GEMINI_API_KEY on first run (handy when the app is
-        // launched from a shell that has the key exported; GUI launches won't inherit
-        // it, so the Keychain is the durable store thereafter).
-        if GeminiKeychain.read() == nil,
-           let env = ProcessInfo.processInfo.environment["GEMINI_API_KEY"],
-           !env.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            GeminiKeychain.save(env)
-        }
-        apiKeyIsSet = GeminiKeychain.read() != nil
+        // Which contexts exist, and whether the pipeline can be invoked at all.
+        refreshContexts()
 
         // Load prior recordings from disk so they survive restarts.
         refreshRecordings()
@@ -152,21 +159,28 @@ final class RecorderModel {
         silenceTimeout = Preferences.silenceTimeout
         silenceThresholdDB = Preferences.silenceThresholdDB
         silenceAutoStopEnabled = Preferences.silenceAutoStop
-        autoTranscribe = Preferences.autoTranscribe
-        let storedTemplate = Preferences.promptTemplate
-        promptTemplate = storedTemplate.isEmpty ? GeminiTranscriber.defaultPromptTemplate : storedTemplate
+        autoProcess = Preferences.autoProcess
+        pipelineDir = Preferences.pipelineDir
     }
 
     /// Whether the prompt differs from the built-in default (drives the Reset button).
-    /// Blank counts as "not customized" — it transcribes with the default anyway.
-    var promptTemplateIsCustomized: Bool {
-        let trimmed = promptTemplate.trimmingCharacters(in: .whitespacesAndNewlines)
-        return !trimmed.isEmpty && promptTemplate != GeminiTranscriber.defaultPromptTemplate
-    }
-
-    /// Restore the built-in Gemini prompt.
-    func resetPromptTemplate() {
-        promptTemplate = GeminiTranscriber.defaultPromptTemplate
+    /// Re-read the contexts from disk and whether docker is reachable.
+    func refreshContexts() {
+        pipelineIsReady = PipelineRunner.resolveDocker() != nil
+            && FileManager.default.fileExists(
+                atPath: (pipelineDir as NSString).appendingPathComponent("docker-compose.yml")
+            )
+        let stored = Preferences.contexts
+        let discovered = PipelineRunner.discoverContexts(pipelineDir: pipelineDir)
+        availableContexts = stored.isEmpty ? discovered : stored
+        // Keep the previous choice when it still exists; otherwise fall back to
+        // the first context so the picker is never empty-but-required.
+        let last = Preferences.lastContext
+        if availableContexts.contains(last) {
+            selectedContext = last
+        } else {
+            selectedContext = availableContexts.first ?? ""
+        }
     }
 
     // MARK: - Recording control
@@ -285,6 +299,7 @@ final class RecorderModel {
         let startedAt = session.startedAt
         let meetingTitle = activeMeeting?.title ?? session.meetingTitle
         let attendees = activeMeeting?.attendees ?? []
+        let chosenContext = selectedContext
         Task.detached(priority: .utility) {
             do {
                 try StereoMixer.mix(
@@ -301,18 +316,32 @@ final class RecorderModel {
                         folderURL: folderURL,
                         meetingTitle: meetingTitle,
                         attendees: attendees,
-                        startedAt: startedAt
+                        startedAt: startedAt,
+                        context: chosenContext
                     )
-                    if self.autoTranscribe {
+                    // O meta.json e escrito SEMPRE, mesmo sem auto-process: e o
+                    // que preserva a escolha de contexto para quando a pipeline
+                    // for acionada depois, pelo botao.
+                    try? PipelineRunner.writeMeta(
+                        folderURL: folderURL,
+                        context: PipelineRunner.Context(
+                            context: chosenContext,
+                            meetingTitle: meetingTitle,
+                            attendees: attendees,
+                            startedAt: startedAt,
+                            localSpeakerName: nil
+                        )
+                    )
+                    if self.autoProcess {
                         self.statusMessage = "Saved \(outputURL.lastPathComponent)"
-                        // Chain transcription off the successful mix.
                         self.startTranscription(pending)
                     } else {
-                        // Auto-transcribe off: keep the recording; the user can
-                        // transcribe it later from the Recent list.
+                        // Pipeline manual: a gravacao fica pronta e o botao
+                        // "Processar" no painel a envia quando voce quiser.
                         self.lastTranscription = pending
+                        self.pendingContext = chosenContext
                         self.transcriptionState = .idle
-                        self.statusMessage = "Saved \(outputURL.lastPathComponent) · transcription off"
+                        self.statusMessage = "Saved \(outputURL.lastPathComponent) · pronta para processar"
                     }
                     self.refreshRecordings()
                 }
@@ -408,40 +437,31 @@ final class RecorderModel {
         elapsed = 0
     }
 
-    // MARK: - Transcription
+    // MARK: - Pipeline
 
-    /// Resolve the Gemini key: Keychain first, then the process environment.
-    private func resolvedAPIKey() -> String? {
-        if let stored = GeminiKeychain.read() { return stored }
-        if let env = ProcessInfo.processInfo.environment["GEMINI_API_KEY"] {
-            let trimmed = env.trimmingCharacters(in: .whitespacesAndNewlines)
-            if !trimmed.isEmpty { return trimmed }
-        }
-        return nil
+    /// Whether there is a saved recording waiting to be sent to the pipeline.
+    var canProcessNow: Bool {
+        lastTranscription != nil && transcriptionState != .running
     }
 
-    /// Save/replace the Gemini API key in the Keychain. If a transcription was
-    /// waiting on a key, it starts immediately.
-    func saveAPIKey(_ raw: String) {
-        guard GeminiKeychain.save(raw) else {
-            statusMessage = "Could not store the API key in the Keychain."
-            return
-        }
-        apiKeyIsSet = true
-        statusMessage = "API key saved"
-        if case .failed = transcriptionState, let pending = lastTranscription {
-            startTranscription(pending)
-        }
+    /// Send the last saved recording to the pipeline — the panel's button.
+    func processLastRecording() {
+        guard let pending = lastTranscription else { return }
+        // Recria com o contexto atual do picker: entre salvar e clicar, voce
+        // pode ter percebido que escolheu a pasta errada.
+        startTranscription(PendingTranscription(
+            audioURL: pending.audioURL,
+            folderURL: pending.folderURL,
+            meetingTitle: pending.meetingTitle,
+            attendees: pending.attendees,
+            startedAt: pending.startedAt,
+            context: selectedContext.isEmpty ? pending.context : selectedContext
+        ))
     }
 
-    /// Remove the stored Gemini API key.
-    func clearAPIKey() {
-        GeminiKeychain.delete()
-        apiKeyIsSet = false
-        statusMessage = "API key removed"
-    }
-
-    /// Re-run the last transcription (after a failure or a freshly entered key).
+    /// Re-run the pipeline on the last recording (after a failure).
+    ///
+    /// Reuses the context chosen at save time, so a retry never asks again.
     func retryTranscription() {
         guard let pending = lastTranscription else { return }
         startTranscription(pending)
@@ -451,22 +471,30 @@ final class RecorderModel {
         lastTranscription = pending
         lastTranscriptText = nil
         lastTranscriptURL = nil
+        lastOutcome = nil
 
-        guard let key = resolvedAPIKey() else {
-            transcriptionState = .failed("No Gemini API key set — add one in Settings to transcribe.")
-            statusMessage = "Saved (no API key — transcription skipped)"
+        guard pipelineIsReady else {
+            transcriptionState = .failed(
+                "Pipeline indisponível: confira se o Docker está aberto e se a pasta em Settings aponta para o repo transcribe."
+            )
+            statusMessage = "Saved (pipeline não acionada)"
+            return
+        }
+        guard !pending.context.isEmpty else {
+            transcriptionState = .failed(
+                "Nenhum contexto escolhido. Crie uma subpasta em ~/Movies/OBS e escolha no painel."
+            )
+            statusMessage = "Saved (sem contexto)"
             return
         }
 
         transcriptionState = .running
-        statusMessage = "Transcribing…"
+        statusMessage = "Processando na pipeline local…"
 
-        var transcriber = self.transcriber
-        transcriber.promptTemplate =
-            promptTemplate.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-            ? GeminiTranscriber.defaultPromptTemplate : promptTemplate
+        let runner = PipelineRunner(pipelineDir: pipelineDir)
         let trimmedName = localSpeakerName.trimmingCharacters(in: .whitespacesAndNewlines)
-        let context = GeminiTranscriber.Context(
+        let context = PipelineRunner.Context(
+            context: pending.context,
             meetingTitle: pending.meetingTitle,
             attendees: pending.attendees,
             startedAt: pending.startedAt,
@@ -475,35 +503,33 @@ final class RecorderModel {
 
         Task { [weak self] in
             do {
-                let markdown = try await transcriber.transcribe(
-                    audioURL: pending.audioURL,
-                    apiKey: key,
-                    context: context
-                )
-                let document = RecorderModel.composeTranscriptDocument(
-                    markdown: markdown,
-                    meetingTitle: pending.meetingTitle,
-                    attendees: pending.attendees,
-                    startedAt: pending.startedAt,
-                    audioName: pending.audioURL.lastPathComponent,
-                    model: transcriber.model
-                )
-                let transcriptURL = pending.folderURL.appendingPathComponent("transcript.md")
-                try document.write(to: transcriptURL, atomically: true, encoding: .utf8)
+                // Fora da main actor: a pipeline leva minutos (Whisper + resumo
+                // + Notion) e travaria a UI inteira aqui.
+                let output = try await Task.detached(priority: .utility) {
+                    try await runner.run(folderURL: pending.folderURL, context: context)
+                }.value
+                // O log da rodada fica ao lado da gravação: é o que explica por
+                // que uma ata saiu com determinado título ou foi marcada
+                // sem_fala, sem precisar reproduzir a execução.
+                let logURL = pending.folderURL.appendingPathComponent("pipeline.log")
+                try? output.write(to: logURL, atomically: true, encoding: .utf8)
                 await MainActor.run {
                     guard let self else { return }
-                    self.lastTranscriptText = document
-                    self.lastTranscriptURL = transcriptURL
-                    self.transcriptionState = .done(transcriptURL)
-                    self.statusMessage = "Transcript saved (transcript.md)"
+                    let outcome = PipelineRunner.outcome(from: output)
+                    self.lastTranscriptText = output
+                    self.lastTranscriptURL = logURL
+                    self.lastOutcome = outcome
+                    self.transcriptionState = .done(logURL)
+                    self.statusMessage = outcome.headline
                     self.refreshRecordings()
                 }
             } catch {
-                let message = RecorderModel.describeTranscriptionError(error)
                 await MainActor.run {
                     guard let self else { return }
-                    self.transcriptionState = .failed(message)
-                    self.statusMessage = "Transcription failed"
+                    self.transcriptionState = .failed(
+                        error.localizedDescription
+                    )
+                    self.statusMessage = "Pipeline falhou"
                 }
             }
         }
@@ -546,12 +572,16 @@ final class RecorderModel {
             statusMessage = "No audio.m4a to transcribe in that folder."
             return
         }
+        // Uma gravacao antiga pode ja ter um meta.json com o contexto
+        // escolhido na epoca; respeita-lo evita refilar no lugar errado.
+        let ctx = RecorderModel.contextFromMeta(entry.folderURL) ?? selectedContext
         startTranscription(PendingTranscription(
             audioURL: audio,
             folderURL: entry.folderURL,
             meetingTitle: entry.title,
             attendees: [],
-            startedAt: entry.date
+            startedAt: entry.date,
+            context: ctx
         ))
     }
 
@@ -588,48 +618,14 @@ final class RecorderModel {
     }
 
     /// Wrap the model's Markdown with a small header (title / date / attendees).
-    private static func composeTranscriptDocument(
-        markdown: String,
-        meetingTitle: String?,
-        attendees: [String],
-        startedAt: Date,
-        audioName: String,
-        model: String
-    ) -> String {
-        let formatter = DateFormatter()
-        formatter.dateStyle = .full
-        formatter.timeStyle = .short
-
-        var header = "# Transcript"
-        if let title = meetingTitle?.trimmingCharacters(in: .whitespacesAndNewlines), !title.isEmpty {
-            header += " — \(title)"
-        }
-
-        var lines = [header, ""]
-        lines.append("- **Recorded:** \(formatter.string(from: startedAt))")
-        if !attendees.isEmpty {
-            lines.append("- **Invited attendees:** \(attendees.joined(separator: ", "))")
-        }
-        lines.append("- **Audio:** `\(audioName)`")
-        lines.append("- **Model:** Gemini `\(model)`")
-        lines.append("")
-        lines.append("> Channel layout — left = desktop/system audio, right = microphone.")
-        lines.append("")
-        lines.append("---")
-        lines.append("")
-        lines.append(markdown.trimmingCharacters(in: .whitespacesAndNewlines))
-        lines.append("")
-        return lines.joined(separator: "\n")
-    }
-
-    private static func describeTranscriptionError(_ error: Error) -> String {
-        if let e = error as? GeminiTranscriber.TranscriberError {
-            return e.errorDescription ?? "Transcription failed."
-        }
-        let ns = error as NSError
-        if ns.domain == NSURLErrorDomain {
-            return "Network error: \(ns.localizedDescription)"
-        }
-        return error.localizedDescription
+    /// Context recorded in a folder's meta.json, if any.
+    private static func contextFromMeta(_ folderURL: URL) -> String? {
+        let url = folderURL.appendingPathComponent("meta.json")
+        guard let data = try? Data(contentsOf: url),
+              let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let ctx = obj["context"] as? String,
+              !ctx.trimmingCharacters(in: .whitespaces).isEmpty
+        else { return nil }
+        return ctx
     }
 }

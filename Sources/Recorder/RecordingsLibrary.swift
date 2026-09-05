@@ -11,13 +11,23 @@ struct RecordingEntry: Identifiable, Equatable {
     let date: Date
     /// audio.m4a, if it exists.
     let audioURL: URL?
-    /// transcript.md, if it exists.
+    /// pipeline.log, if the pipeline already ran on this folder.
     let transcriptURL: URL?
+    /// Context chosen when recording, read from meta.json.
+    let context: String?
+    /// Whether the pipeline already produced processed.m4a for this folder.
+    let isPrepared: Bool
 
+    /// Kept as `hasTranscript` so the drag/menu code reads the same; it now
+    /// means "the pipeline already ran here".
     var hasTranscript: Bool { transcriptURL != nil }
+
+    /// A title someone can recognize: the meeting name when the calendar had
+    /// one, otherwise the context — never the useless literal "Recording".
     var displayTitle: String {
         if let title, !title.isEmpty { return title }
-        return "Recording"
+        if let context, !context.isEmpty { return context }
+        return "Sem contexto"
     }
 }
 
@@ -25,6 +35,17 @@ struct RecordingEntry: Identifiable, Equatable {
 /// (and their transcripts) after a restart — the in-memory list doesn't survive
 /// relaunches.
 enum RecordingsLibrary {
+
+    /// Context recorded in a folder's meta.json, if any.
+    static func contextFromMeta(_ folderURL: URL) -> String? {
+        let url = folderURL.appendingPathComponent("meta.json")
+        guard let data = try? Data(contentsOf: url),
+              let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let ctx = obj["context"] as? String,
+              !ctx.trimmingCharacters(in: .whitespaces).isEmpty
+        else { return nil }
+        return ctx
+    }
 
     /// ~/Documents/Recordings (not created here).
     static func recordingsRoot() -> URL? {
@@ -53,7 +74,7 @@ enum RecordingsLibrary {
             guard values?.isDirectory == true else { return nil }
 
             let audio = url.appendingPathComponent("audio.m4a")
-            let transcript = url.appendingPathComponent("transcript.md")
+            let transcript = url.appendingPathComponent("pipeline.log")
             let hasAudio = fm.fileExists(atPath: audio.path)
             let hasTranscript = fm.fileExists(atPath: transcript.path)
             let hasRaw = fm.fileExists(atPath: url.appendingPathComponent("desktop.caf").path)
@@ -69,7 +90,11 @@ enum RecordingsLibrary {
                 title: title,
                 date: parsedDate ?? fileDate,
                 audioURL: hasAudio ? audio : nil,
-                transcriptURL: hasTranscript ? transcript : nil
+                transcriptURL: hasTranscript ? transcript : nil,
+                context: contextFromMeta(url),
+                isPrepared: fm.fileExists(
+                    atPath: url.appendingPathComponent("processed.m4a").path
+                )
             )
         }
 

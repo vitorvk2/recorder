@@ -4,13 +4,16 @@ import AppKit
 /// The full menu-bar panel UI for the recorder.
 ///
 /// Layout (top -> bottom):
-///   1. Header — state badge + elapsed (mm:ss) + status line
-///   2. Primary controls — Record (idle) OR Pause/Resume + Save + Trash (recording/paused)
-///   3. Two level meters — "Desktop (L)" + "Mic (R)" bound to model.desktopLevel/micLevel
-///   4. Meetings list — title + time range, with a per-row record button; in-progress highlighted
-///   5. Footer — Recordings folder + Settings… + Quit
+///   1. Header — estado + tempo decorrido
+///   2. Zona de ação — contexto + UM botão proeminente por vez:
+///      Gravar (parado) · Pausar/Salvar/Descartar (gravando) ·
+///      Processar (gravação pronta) · resultado com link do Notion
+///   3. Medidores — "Sistema" e "Microfone"
+///   4. Agenda — eventos do dia, com gravar direto na linha
+///   5. Gravações recentes
+///   6. Rodapé — pasta, Settings, Quit
 ///
-/// Preferences (your name, Gemini API key, auto-transcribe, the editable prompt,
+/// Preferences (your name, pipeline folder, contexto, auto-processamento,
 /// and silence auto-stop) live in a dedicated Preferences window — see
 /// `PreferencesView` / `PreferencesWindowController` — opened from the footer's
 /// "Settings…" button or ⌘,.
@@ -24,17 +27,13 @@ struct RecorderPanel: View {
     private let panelWidth: CGFloat = 340
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
+        VStack(alignment: .leading, spacing: 14) {
             header
 
-            Divider()
-
-            controls
-
-            if showTranscription {
-                Divider()
-                transcriptionSection
-            }
+            // Zona de ação: escolher onde vai + o botão que importa agora.
+            // Um único botão proeminente por vez — antes havia dois (Gravar e
+            // Processar), e nada indicava qual era o passo seguinte.
+            actionZone
 
             Divider()
 
@@ -49,43 +48,26 @@ struct RecorderPanel: View {
                 recentSection
             }
 
-            Divider()
-
             footer
         }
-        .padding(12)
+        .padding(14)
         .frame(width: panelWidth)
-        // Suppress the auto-drawn focus ring on the first control when the
-        // menu-bar window opens. (All text entry lives in the Preferences window.)
-        .focusEffectDisabled()
     }
 
     // MARK: - 1. Header
 
     private var header: some View {
-        HStack(alignment: .center, spacing: 8) {
-            // State indicator dot + label.
+        HStack(alignment: .firstTextBaseline, spacing: 10) {
             Image(systemName: stateSymbolName)
                 .foregroundStyle(stateColor)
                 .font(.system(size: 14, weight: .semibold))
                 .symbolRenderingMode(.hierarchical)
 
-            VStack(alignment: .leading, spacing: 2) {
-                Text(stateLabel)
-                    .font(.headline)
-
-                if let status = model.statusMessage, !status.isEmpty {
-                    Text(status)
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                        .lineLimit(2)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
-            }
+            Text(stateLabel)
+                .font(.headline)
 
             Spacer(minLength: 8)
 
-            // Elapsed time, only meaningful while recording / paused.
             if model.state != .idle {
                 Text(formattedElapsed(model.elapsed))
                     .font(.system(.title3, design: .monospaced))
@@ -95,11 +77,202 @@ struct RecorderPanel: View {
         }
     }
 
+    // MARK: - 2. Ação
+
+    /// Contexto + ação principal, numa unidade só.
+    ///
+    /// O picker fica junto do botão porque "gravar" e "onde isso vai parar" são
+    /// a mesma decisão; solto no meio do painel ele não pertencia a nada.
+    @ViewBuilder
+    private var actionZone: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            switch model.state {
+            case .idle:
+                if !model.availableContexts.isEmpty {
+                    contextRow
+                }
+                if model.transcriptionState == .running {
+                    runningRow
+                } else if let outcome = model.lastOutcome {
+                    resultRow(outcome)
+                    recordButton(prominent: true)
+                } else if model.canProcessNow {
+                    pendingRow
+                    recordButton(prominent: false)
+                } else {
+                    recordButton(prominent: true)
+                }
+
+            case .recording, .paused:
+                recordingControls
+            }
+        }
+    }
+
+    private var contextRow: some View {
+        HStack(spacing: 8) {
+            Text("Gravar em")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            Picker("", selection: Binding(
+                get: { model.selectedContext },
+                set: { model.selectedContext = $0 }
+            )) {
+                ForEach(model.availableContexts, id: \.self) { Text($0).tag($0) }
+            }
+            .labelsHidden()
+            .fixedSize()
+            Spacer()
+        }
+    }
+
+    /// Gravar. Proeminente só quando é a próxima ação; quando há gravação
+    /// esperando processamento, ela é que ganha o destaque.
+    @ViewBuilder
+    private func recordButton(prominent: Bool) -> some View {
+        let label = Label("Gravar", systemImage: "record.circle.fill")
+            .frame(maxWidth: .infinity)
+        if prominent {
+            Button { model.startRecording(meeting: nil) } label: { label }
+                .controlSize(.large)
+                .buttonStyle(.borderedProminent)
+                .tint(.red)
+                .keyboardShortcut("r", modifiers: [.command])
+        } else {
+            Button { model.startRecording(meeting: nil) } label: { label }
+                .controlSize(.large)
+                .buttonStyle(.bordered)
+                .tint(.red)
+                .keyboardShortcut("r", modifiers: [.command])
+        }
+    }
+
+    /// Gravação salva esperando processamento — aqui ela é a ação principal,
+    /// porque é o passo seguinte natural de quem acabou de parar de gravar.
+    private var pendingRow: some View {
+        HStack(spacing: 10) {
+            Image(systemName: "waveform")
+                .foregroundStyle(.secondary)
+            VStack(alignment: .leading, spacing: 1) {
+                Text("Gravação pronta")
+                    .font(.callout.weight(.medium))
+                Text(model.pendingContext.isEmpty ? "sem contexto" : model.pendingContext)
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+            }
+            Spacer(minLength: 8)
+            Button {
+                model.processLastRecording()
+            } label: {
+                Text("Processar")
+            }
+            .buttonStyle(.borderedProminent)
+            .tint(.indigo)
+            .disabled(!model.pipelineIsReady)
+            .keyboardShortcut("p", modifiers: [.command])
+            .help(model.pipelineIsReady
+                  ? "Transcreve, resume e publica no Notion"
+                  : "Abra o Docker Desktop e confira a pasta em Settings")
+        }
+        .padding(10)
+        .background(Color.secondary.opacity(0.10), in: RoundedRectangle(cornerRadius: 8))
+    }
+
+    private var runningRow: some View {
+        HStack(spacing: 10) {
+            ProgressView().controlSize(.small)
+            VStack(alignment: .leading, spacing: 1) {
+                Text("Processando…")
+                    .font(.callout.weight(.medium))
+                Text("transcrevendo, resumindo e publicando")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+            }
+            Spacer()
+        }
+        .padding(10)
+        .background(Color.secondary.opacity(0.10), in: RoundedRectangle(cornerRadius: 8))
+    }
+
+    /// Resultado: o título da ata e um link — não quatro botões de log.
+    private func resultRow(_ outcome: PipelineRunner.Outcome) -> some View {
+        HStack(alignment: .top, spacing: 10) {
+            Image(systemName: outcome.notionURL == nil
+                  ? "exclamationmark.circle.fill" : "checkmark.circle.fill")
+                .foregroundStyle(outcome.notionURL == nil ? .orange : .green)
+            VStack(alignment: .leading, spacing: 3) {
+                Text(outcome.headline)
+                    .font(.callout)
+                    .lineLimit(2)
+                    .fixedSize(horizontal: false, vertical: true)
+                if let url = outcome.notionURL {
+                    Link(destination: url) {
+                        Label("Abrir no Notion", systemImage: "arrow.up.forward.square")
+                            .font(.caption)
+                    }
+                }
+            }
+            Spacer(minLength: 4)
+            Menu {
+                Button("Copiar log") { model.copyTranscriptText() }
+                Button("Mostrar no Finder") { model.revealTranscript() }
+                if model.pipelineIsReady {
+                    Divider()
+                    Button("Processar de novo") { model.retryTranscription() }
+                }
+            } label: {
+                Image(systemName: "ellipsis.circle")
+            }
+            .menuStyle(.borderlessButton)
+            .menuIndicator(.hidden)
+            .fixedSize()
+        }
+        .padding(10)
+        .background(Color.secondary.opacity(0.10), in: RoundedRectangle(cornerRadius: 8))
+    }
+
+    private var recordingControls: some View {
+        HStack(spacing: 8) {
+            Button {
+                model.togglePause()
+            } label: {
+                Label(
+                    model.state == .paused ? "Continuar" : "Pausar",
+                    systemImage: model.state == .paused ? "play.fill" : "pause.fill"
+                )
+                .frame(maxWidth: .infinity)
+            }
+            .controlSize(.large)
+            .buttonStyle(.bordered)
+            .tint(.orange)
+
+            Button {
+                model.saveAndStop()
+            } label: {
+                Label("Salvar", systemImage: "stop.fill")
+                    .frame(maxWidth: .infinity)
+            }
+            .controlSize(.large)
+            .buttonStyle(.borderedProminent)
+            .tint(.blue)
+
+            Button(role: .destructive) {
+                model.trashAndStop()
+            } label: {
+                Image(systemName: "trash")
+            }
+            .controlSize(.large)
+            .buttonStyle(.bordered)
+            .tint(.red)
+            .help("Descartar esta gravação")
+        }
+    }
+
     private var stateLabel: String {
         switch model.state {
-        case .idle:      return "Ready"
-        case .recording: return "Recording"
-        case .paused:    return "Paused"
+        case .idle:      return "Pronto"
+        case .recording: return "Gravando"
+        case .paused:    return "Pausado"
         }
     }
 
@@ -121,185 +294,9 @@ struct RecorderPanel: View {
 
     // MARK: - 2. Primary controls
 
-    @ViewBuilder
-    private var controls: some View {
-        switch model.state {
-        case .idle:
-            if let current = model.currentMeeting {
-                // In a meeting: the primary button auto-tags it; the small
-                // secondary button records without attaching to any meeting.
-                VStack(alignment: .leading, spacing: 6) {
-                    HStack(spacing: 8) {
-                        Button {
-                            model.startRecording(meeting: current)
-                        } label: {
-                            Label("Record Meeting", systemImage: "record.circle.fill")
-                                .frame(maxWidth: .infinity)
-                        }
-                        .controlSize(.large)
-                        .buttonStyle(.borderedProminent)
-                        .tint(.red)
-                        .keyboardShortcut("r", modifiers: [.command])
-
-                        Button {
-                            model.startRecording(meeting: nil)
-                        } label: {
-                            Image(systemName: "record.circle")
-                                .frame(width: 22)
-                        }
-                        .controlSize(.large)
-                        .buttonStyle(.bordered)
-                        .help("Record without attaching to a meeting")
-                    }
-                    Text("Tags this recording as “\(current.title)”.")
-                        .font(.caption2)
-                        .foregroundStyle(.secondary)
-                        .lineLimit(1)
-                        .truncationMode(.tail)
-                }
-            } else {
-                // No meeting in progress: a single, plain Record button.
-                Button {
-                    model.startRecording(meeting: nil)
-                } label: {
-                    Label("Record", systemImage: "record.circle.fill")
-                        .frame(maxWidth: .infinity)
-                }
-                .controlSize(.large)
-                .buttonStyle(.borderedProminent)
-                .tint(.red)
-                .keyboardShortcut("r", modifiers: [.command])
-            }
-
-        case .recording, .paused:
-            HStack(spacing: 8) {
-                // Pause / Resume toggles between the two recording states.
-                Button {
-                    model.togglePause()
-                } label: {
-                    Label(
-                        model.state == .paused ? "Resume" : "Pause",
-                        systemImage: model.state == .paused ? "play.fill" : "pause.fill"
-                    )
-                    .frame(maxWidth: .infinity)
-                }
-                .controlSize(.large)
-                .buttonStyle(.bordered)
-                .tint(.orange)
-
-                // Save + mix.
-                Button {
-                    model.saveAndStop()
-                } label: {
-                    Label("Save", systemImage: "stop.fill")
-                        .frame(maxWidth: .infinity)
-                }
-                .controlSize(.large)
-                .buttonStyle(.borderedProminent)
-                .tint(.blue)
-
-                // Discard everything.
-                Button(role: .destructive) {
-                    model.trashAndStop()
-                } label: {
-                    Image(systemName: "trash")
-                }
-                .controlSize(.large)
-                .buttonStyle(.bordered)
-                .tint(.red)
-                .help("Discard this recording")
-            }
-        }
-    }
+    // MARK: - 2a. Contexto e disparo da pipeline
 
     // MARK: - 2b. Transcription
-
-    private var showTranscription: Bool {
-        model.transcriptionState != .idle
-    }
-
-    @ViewBuilder
-    private var transcriptionSection: some View {
-        switch model.transcriptionState {
-        case .idle:
-            EmptyView()
-
-        case .running:
-            HStack(spacing: 8) {
-                ProgressView()
-                    .controlSize(.small)
-                Text("Transcribing with Gemini…")
-                    .font(.callout)
-                    .foregroundStyle(.secondary)
-                Spacer()
-            }
-
-        case .done(let url):
-            VStack(alignment: .leading, spacing: 6) {
-                HStack(spacing: 6) {
-                    Image(systemName: "checkmark.circle.fill")
-                        .foregroundStyle(.green)
-                    Text("Transcript ready")
-                        .font(.callout.weight(.medium))
-                    Spacer()
-                }
-
-                HStack(spacing: 8) {
-                    Button {
-                        model.copyTranscriptText()
-                    } label: {
-                        Label("Copy text", systemImage: "doc.on.clipboard")
-                    }
-                    .help("Copy the transcript contents to the clipboard")
-
-                    Button {
-                        model.copyTranscriptFile()
-                    } label: {
-                        Label("Copy file", systemImage: "doc.on.doc")
-                    }
-                    .help("Copy the transcript.md file (paste into Finder, Mail, …)")
-
-                    Button {
-                        model.revealTranscript()
-                    } label: {
-                        Image(systemName: "folder")
-                    }
-                    .help("Reveal transcript.md in Finder")
-
-                    Spacer()
-                }
-                .buttonStyle(.bordered)
-                .controlSize(.small)
-
-                // Drag handle — drag transcript.md straight into another window
-                // (Finder, Mail, an editor, a chat). Falls back to the copy/reveal
-                // buttons above if a target doesn't accept the drag.
-                transcriptDragHandle(url)
-            }
-
-        case .failed(let message):
-            VStack(alignment: .leading, spacing: 6) {
-                HStack(alignment: .top, spacing: 6) {
-                    Image(systemName: "exclamationmark.triangle.fill")
-                        .foregroundStyle(.orange)
-                    Text(message)
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                        .fixedSize(horizontal: false, vertical: true)
-                    Spacer()
-                }
-                if model.apiKeyIsSet {
-                    Button {
-                        model.retryTranscription()
-                    } label: {
-                        Label("Retry", systemImage: "arrow.clockwise")
-                    }
-                    .buttonStyle(.bordered)
-                    .controlSize(.small)
-                }
-            }
-        }
-    }
 
     /// A draggable chip representing the transcript file. Dragging it out of the
     /// panel provides the actual file (via `NSItemProvider(contentsOf:)`), so it
@@ -341,8 +338,8 @@ struct RecorderPanel: View {
 
     private var meters: some View {
         VStack(alignment: .leading, spacing: 8) {
-            LevelMeter(label: "Desktop (L)", level: model.desktopLevel, tint: .green)
-            LevelMeter(label: "Mic (R)",     level: model.micLevel,     tint: .blue)
+            LevelMeter(label: "Sistema",   level: model.desktopLevel, tint: .green)
+            LevelMeter(label: "Microfone", level: model.micLevel,     tint: .blue)
         }
     }
 
@@ -351,7 +348,7 @@ struct RecorderPanel: View {
     private var meetingsSection: some View {
         VStack(alignment: .leading, spacing: 6) {
             HStack {
-                Text("Meetings")
+                Text("Agenda")
                     .font(.subheadline.weight(.semibold))
                 Spacer()
                 Button {
@@ -387,7 +384,7 @@ struct RecorderPanel: View {
 
     private var recentSection: some View {
         VStack(alignment: .leading, spacing: 6) {
-            Text("Recent recordings")
+            Text("Gravações recentes")
                 .font(.subheadline.weight(.semibold))
 
             VStack(spacing: 2) {
@@ -404,7 +401,7 @@ struct RecorderPanel: View {
             // Draggable region: icon + title/subtitle + grip. Dragging it out
             // provides the transcript file (or the audio if there's no transcript).
             HStack(spacing: 8) {
-                Image(systemName: entry.hasTranscript ? "doc.text.fill" : "waveform.circle.fill")
+                Image(systemName: entry.hasTranscript ? "checkmark.circle.fill" : "waveform.circle.fill")
                     .foregroundStyle(entry.hasTranscript ? Color.accentColor : Color.secondary)
 
                 VStack(alignment: .leading, spacing: 1) {
@@ -442,9 +439,9 @@ struct RecorderPanel: View {
                     }
                 } else if entry.audioURL != nil {
                     Button { model.transcribeExisting(entry) } label: {
-                        Label("Transcribe", systemImage: "text.bubble")
+                        Label("Processar na pipeline", systemImage: "gearshape.arrow.trianglehead.2.clockwise.rotate.90")
                     }
-                    .disabled(!model.apiKeyIsSet || model.transcriptionState == .running)
+                    .disabled(!model.pipelineIsReady || model.transcriptionState == .running)
                 }
                 if let audio = entry.audioURL {
                     Button { model.copyFileToPasteboard(audio) } label: {
@@ -488,7 +485,16 @@ struct RecorderPanel: View {
         formatter.dateStyle = .short
         formatter.timeStyle = .short
         let when = formatter.string(from: entry.date)
-        let status = entry.hasTranscript ? "Transcript" : (entry.audioURL != nil ? "Audio only" : "Raw only")
+        // O que importa aqui é em que ponto do fluxo a gravação está, não que
+        // formato de arquivo existe na pasta.
+        let status: String
+        if entry.hasTranscript {
+            status = "publicada"
+        } else if entry.isPrepared {
+            status = "preparada"
+        } else {
+            status = "não processada"
+        }
         return "\(when) · \(status)"
     }
 
@@ -499,7 +505,7 @@ struct RecorderPanel: View {
             Button {
                 model.openRecordingsFolder()
             } label: {
-                Label("Recordings", systemImage: "folder")
+                Label("Gravações", systemImage: "folder")
             }
             .buttonStyle(.borderless)
             .help("Open ~/Documents/Recordings in Finder")
@@ -509,7 +515,7 @@ struct RecorderPanel: View {
             Button {
                 openPreferences()
             } label: {
-                Label("Settings…", systemImage: "gearshape")
+                Label("Ajustes…", systemImage: "gearshape")
             }
             .buttonStyle(.borderless)
             .keyboardShortcut(",", modifiers: [.command])
@@ -518,7 +524,7 @@ struct RecorderPanel: View {
             Button {
                 model.quit()
             } label: {
-                Label("Quit", systemImage: "power")
+                Label("Sair", systemImage: "power")
             }
             .buttonStyle(.borderless)
             .keyboardShortcut("q", modifiers: [.command])
