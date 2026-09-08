@@ -57,7 +57,7 @@ struct PipelineRunner {
         try data.write(to: folderURL.appendingPathComponent("meta.json"), options: .atomic)
     }
 
-    func run(folderURL: URL, context: Context) async throws -> String {
+    func run(metaFolderURL: URL?, context: Context) async throws -> String {
         guard let docker = Self.resolveDocker() else { throw Failure.dockerMissing }
         var isDir: ObjCBool = false
         let composeFile = (pipelineDir as NSString).appendingPathComponent("docker-compose.yml")
@@ -65,7 +65,9 @@ struct PipelineRunner {
             throw Failure.pipelineDirMissing(pipelineDir)
         }
 
-        try Self.writeMeta(folderURL: folderURL, context: context)
+        if let metaFolderURL {
+            try Self.writeMeta(folderURL: metaFolderURL, context: context)
+        }
 
         let process = Process()
         process.executableURL = URL(fileURLWithPath: docker)
@@ -121,9 +123,20 @@ struct PipelineRunner {
     }
 
     struct Outcome {
+        enum Kind: Equatable {
+            case published
+            case noSpeech
+            case nothingPending
+            case failed
+            case processed
+        }
+
+        var kind: Kind
         var headline: String
         var notionURL: URL?
     }
+
+    static let stepMarkers = ["[prep]", "[stt]", "[llm]", "[notion]"]
 
     static func outcome(from output: String) -> Outcome {
         let lines = output
@@ -136,14 +149,32 @@ struct PipelineRunner {
 
         if let ok = lines.last(where: { $0.hasPrefix("ok \"") }) {
             let title = ok.dropFirst(4).dropLast(ok.hasSuffix("\"") ? 1 : 0)
-            return Outcome(headline: String(title), notionURL: url)
+            return Outcome(kind: .published, headline: String(title), notionURL: url)
         }
         if lines.contains(where: { $0.contains("sem_fala") }) {
-            return Outcome(headline: "Sem fala detectável — não publicada", notionURL: nil)
+            return Outcome(
+                kind: .noSpeech,
+                headline: "Sem fala detectável, não foi publicada",
+                notionURL: nil
+            )
         }
         if let err = lines.last(where: { $0.contains("ERRO:") }) {
-            return Outcome(headline: String(err.drop(while: { $0 != "E" })), notionURL: nil)
+            return Outcome(
+                kind: .failed,
+                headline: String(err.drop(while: { $0 != "E" })),
+                notionURL: nil
+            )
         }
-        return Outcome(headline: "Processada", notionURL: url)
+        let didWork = lines.contains { line in
+            stepMarkers.contains { line.hasPrefix($0) }
+        }
+        if !didWork {
+            return Outcome(
+                kind: .nothingPending,
+                headline: "Nada pendente, tudo já estava publicado",
+                notionURL: nil
+            )
+        }
+        return Outcome(kind: .processed, headline: "Processada", notionURL: url)
     }
 }

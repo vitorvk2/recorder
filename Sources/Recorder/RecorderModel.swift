@@ -73,7 +73,8 @@ final class RecorderModel {
 
     private struct PendingTranscription {
         let audioURL: URL
-        let folderURL: URL
+        let metaFolderURL: URL?
+        let logURL: URL
         let meetingTitle: String?
         let attendees: [String]
         let startedAt: Date
@@ -271,7 +272,8 @@ final class RecorderModel {
                     guard let self else { return }
                     let pending = PendingTranscription(
                         audioURL: outputURL,
-                        folderURL: folderURL,
+                        metaFolderURL: folderURL,
+                        logURL: folderURL.appendingPathComponent("pipeline.log"),
                         meetingTitle: meetingTitle,
                         attendees: attendees,
                         startedAt: startedAt,
@@ -394,7 +396,8 @@ final class RecorderModel {
 
         startTranscription(PendingTranscription(
             audioURL: pending.audioURL,
-            folderURL: pending.folderURL,
+            metaFolderURL: pending.metaFolderURL,
+            logURL: pending.logURL,
             meetingTitle: pending.meetingTitle,
             attendees: pending.attendees,
             startedAt: pending.startedAt,
@@ -444,10 +447,10 @@ final class RecorderModel {
         Task { [weak self] in
             do {
                 let output = try await Task.detached(priority: .utility) {
-                    try await runner.run(folderURL: pending.folderURL, context: context)
+                    try await runner.run(metaFolderURL: pending.metaFolderURL, context: context)
                 }.value
 
-                let logURL = pending.folderURL.appendingPathComponent("pipeline.log")
+                let logURL = pending.logURL
                 try? output.write(to: logURL, atomically: true, encoding: .utf8)
                 await MainActor.run {
                     guard let self else { return }
@@ -493,20 +496,30 @@ final class RecorderModel {
     }
 
     func refreshRecordings() {
-        recentRecordings = RecordingsLibrary.recent(limit: 4)
+        recentRecordings = RecordingsLibrary.recent(
+            limit: 6,
+            obsRoot: PipelineRunner.mediaRoot(pipelineDir: pipelineDir)
+        )
     }
 
     func transcribeExisting(_ entry: RecordingEntry) {
         guard let audio = entry.audioURL else {
-            statusMessage = "No audio.m4a to transcribe in that folder."
+            statusMessage = "Sem arquivo de mídia para processar nessa gravação."
             return
         }
 
-        let ctx = RecorderModel.contextFromMeta(entry.folderURL) ?? selectedContext
+        let ctx: String
+        if let metaFolder = entry.metaFolderURL {
+            ctx = RecorderModel.contextFromMeta(metaFolder) ?? entry.context ?? selectedContext
+        } else {
+            ctx = entry.context ?? selectedContext
+        }
+
         startTranscription(PendingTranscription(
             audioURL: audio,
-            folderURL: entry.folderURL,
-            meetingTitle: entry.title,
+            metaFolderURL: entry.metaFolderURL,
+            logURL: entry.logURL,
+            meetingTitle: entry.source == .obs ? nil : entry.title,
             attendees: [],
             startedAt: entry.date,
             context: ctx

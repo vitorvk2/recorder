@@ -159,11 +159,28 @@ struct RecorderPanel: View {
         .background(Color.secondary.opacity(0.10), in: RoundedRectangle(cornerRadius: 8))
     }
 
+    private func outcomeIcon(_ kind: PipelineRunner.Outcome.Kind) -> String {
+        switch kind {
+        case .published, .processed: return "checkmark.circle.fill"
+        case .nothingPending: return "info.circle.fill"
+        case .noSpeech: return "exclamationmark.circle.fill"
+        case .failed: return "exclamationmark.triangle.fill"
+        }
+    }
+
+    private func outcomeTint(_ kind: PipelineRunner.Outcome.Kind) -> Color {
+        switch kind {
+        case .published, .processed: return .green
+        case .nothingPending: return .secondary
+        case .noSpeech: return .orange
+        case .failed: return .red
+        }
+    }
+
     private func resultRow(_ outcome: PipelineRunner.Outcome) -> some View {
         HStack(alignment: .top, spacing: 10) {
-            Image(systemName: outcome.notionURL == nil
-                  ? "exclamationmark.circle.fill" : "checkmark.circle.fill")
-                .foregroundStyle(outcome.notionURL == nil ? .orange : .green)
+            Image(systemName: outcomeIcon(outcome.kind))
+                .foregroundStyle(outcomeTint(outcome.kind))
             VStack(alignment: .leading, spacing: 3) {
                 Text(outcome.headline)
                     .font(.callout)
@@ -348,7 +365,7 @@ struct RecorderPanel: View {
     private func recentRow(_ entry: RecordingEntry) -> some View {
         HStack(spacing: 8) {
             HStack(spacing: 8) {
-                Image(systemName: entry.hasTranscript ? "checkmark.circle.fill" : "waveform.circle.fill")
+                Image(systemName: recentIcon(entry))
                     .foregroundStyle(entry.hasTranscript ? Color.accentColor : Color.secondary)
 
                 VStack(alignment: .leading, spacing: 1) {
@@ -389,13 +406,21 @@ struct RecorderPanel: View {
                     }
                     .disabled(!model.pipelineIsReady || model.transcriptionState == .running)
                 }
+                if let legacy = entry.legacyTextURL {
+                    Button { model.copyTextOfFile(legacy) } label: {
+                        Label("Copiar transcrição antiga", systemImage: "doc.plaintext")
+                    }
+                }
                 if let audio = entry.audioURL {
                     Button { model.copyFileToPasteboard(audio) } label: {
-                        Label("Copy audio file", systemImage: "waveform")
+                        Label(
+                            entry.source == .obs ? "Copiar arquivo de vídeo" : "Copy audio file",
+                            systemImage: entry.source == .obs ? "film" : "waveform"
+                        )
                     }
                 }
                 Divider()
-                Button { model.reveal(entry.folderURL) } label: {
+                Button { model.reveal(entry.revealURL) } label: {
                     Label("Reveal in Finder", systemImage: "folder")
                 }
             } label: {
@@ -424,21 +449,34 @@ struct RecorderPanel: View {
         return NSItemProvider()
     }
 
+    private func recentIcon(_ entry: RecordingEntry) -> String {
+        if entry.hasTranscript { return "checkmark.circle.fill" }
+        return entry.source == .obs ? "film.circle.fill" : "waveform.circle.fill"
+    }
+
     private func recentSubtitle(_ entry: RecordingEntry) -> String {
         let formatter = DateFormatter()
         formatter.dateStyle = .short
         formatter.timeStyle = .short
         let when = formatter.string(from: entry.date)
 
-        let status: String
-        if entry.hasTranscript {
-            status = "publicada"
-        } else if entry.isPrepared {
-            status = "preparada"
+        let origin = entry.source == .obs ? "OBS" : "Recorder"
+        var parts = [when]
+        if let context = entry.context, !context.isEmpty {
+            parts.append("\(origin)/\(context)")
         } else {
-            status = "não processada"
+            parts.append(origin)
         }
-        return "\(when) · \(status)"
+
+        if entry.hasTranscript {
+            parts.append("publicada")
+        } else if entry.isPrepared {
+            parts.append("preparada")
+        } else if entry.stateIsKnown {
+            parts.append("não processada")
+        }
+
+        return parts.joined(separator: " · ")
     }
 
     private var footer: some View {

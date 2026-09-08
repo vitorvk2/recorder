@@ -1,8 +1,19 @@
 import Foundation
 
+enum RecordingSource: Equatable {
+    case recorder
+    case obs
+}
+
 struct RecordingEntry: Identifiable, Equatable {
-    var id: String { folderURL.path }
-    let folderURL: URL
+    let id: String
+    let source: RecordingSource
+
+    let metaFolderURL: URL?
+
+    let revealURL: URL
+
+    let logURL: URL
 
     let title: String?
 
@@ -12,9 +23,13 @@ struct RecordingEntry: Identifiable, Equatable {
 
     let transcriptURL: URL?
 
+    let legacyTextURL: URL?
+
     let context: String?
 
     let isPrepared: Bool
+
+    let stateIsKnown: Bool
 
     var hasTranscript: Bool { transcriptURL != nil }
 
@@ -26,6 +41,14 @@ struct RecordingEntry: Identifiable, Equatable {
 }
 
 enum RecordingsLibrary {
+    static let mediaExtensions: Set<String> = [
+        "mp4", "mov", "mkv", "m4a", "mp3", "wav", "flac",
+    ]
+
+    private static let obsNamePattern = try? NSRegularExpression(
+        pattern: #"(\d{4})-(\d{2})-(\d{2})[ _](\d{2})-(\d{2})-(\d{2})"#
+    )
+
     static func contextFromMeta(_ folderURL: URL) -> String? {
         let url = folderURL.appendingPathComponent("meta.json")
         guard let data = try? Data(contentsOf: url),
@@ -43,7 +66,12 @@ enum RecordingsLibrary {
         return documents.appendingPathComponent("Recordings", isDirectory: true)
     }
 
-    static func recent(limit: Int) -> [RecordingEntry] {
+    static func recent(limit: Int, obsRoot: URL?) -> [RecordingEntry] {
+        let merged = recorderEntries() + obsEntries(root: obsRoot)
+        return Array(merged.sorted { $0.date > $1.date }.prefix(limit))
+    }
+
+    private static func recorderEntries() -> [RecordingEntry] {
         let fm = FileManager.default
         guard let root = recordingsRoot(),
               let items = try? fm.contentsOfDirectory(
@@ -54,7 +82,7 @@ enum RecordingsLibrary {
             return []
         }
 
-        let entries: [RecordingEntry] = items.compactMap { url in
+        return items.compactMap { url in
             let values = try? url.resourceValues(forKeys: [
                 .isDirectoryKey, .creationDateKey, .contentModificationDateKey,
             ])
@@ -73,19 +101,100 @@ enum RecordingsLibrary {
             let fileDate = values?.creationDate ?? values?.contentModificationDate ?? .distantPast
 
             return RecordingEntry(
-                folderURL: url,
+                id: url.path,
+                source: .recorder,
+                metaFolderURL: url,
+                revealURL: url,
+                logURL: transcript,
                 title: title,
                 date: parsedDate ?? fileDate,
                 audioURL: hasAudio ? audio : nil,
                 transcriptURL: hasTranscript ? transcript : nil,
+                legacyTextURL: nil,
                 context: contextFromMeta(url),
                 isPrepared: fm.fileExists(
                     atPath: url.appendingPathComponent("processed.m4a").path
-                )
+                ),
+                stateIsKnown: true
             )
         }
+    }
 
-        return Array(entries.sorted { $0.date > $1.date }.prefix(limit))
+    private static func obsEntries(root: URL?) -> [RecordingEntry] {
+        let fm = FileManager.default
+        guard let root, fm.fileExists(atPath: root.path),
+              let contexts = try? fm.contentsOfDirectory(
+                at: root, includingPropertiesForKeys: [.isDirectoryKey], options: [.skipsHiddenFiles]
+              ) else {
+            return []
+        }
+
+        var out: [RecordingEntry] = []
+        for contextURL in contexts {
+            guard (try? contextURL.resourceValues(forKeys: [.isDirectoryKey]))?.isDirectory == true,
+                  let files = try? fm.contentsOfDirectory(
+                    at: contextURL,
+                    includingPropertiesForKeys: [.contentModificationDateKey, .creationDateKey],
+                    options: [.skipsHiddenFiles]
+                  ) else { continue }
+
+            for fileURL in files {
+                guard mediaExtensions.contains(fileURL.pathExtension.lowercased()) else { continue }
+
+                let base = fileURL.deletingPathExtension()
+                let log = base.appendingPathExtension("pipeline.log")
+                let legacy = base.appendingPathExtension("txt")
+                let hasLog = fm.fileExists(atPath: log.path)
+                let hasLegacy = fm.fileExists(atPath: legacy.path)
+
+                let values = try? fileURL.resourceValues(forKeys: [
+                    .contentModificationDateKey, .creationDateKey,
+                ])
+                let fileDate = values?.creationDate ?? values?.contentModificationDate ?? .distantPast
+
+                out.append(
+                    RecordingEntry(
+                        id: fileURL.path,
+                        source: .obs,
+                        metaFolderURL: nil,
+                        revealURL: fileURL,
+                        logURL: log,
+                        title: fileURL.deletingPathExtension().lastPathComponent,
+                        date: parseObsName(fileURL.lastPathComponent) ?? fileDate,
+                        audioURL: fileURL,
+                        transcriptURL: hasLog ? log : nil,
+                        legacyTextURL: hasLegacy ? legacy : nil,
+                        context: contextURL.lastPathComponent,
+                        isPrepared: false,
+                        stateIsKnown: hasLog
+                    )
+                )
+            }
+        }
+        return out
+    }
+
+    static func parseObsName(_ name: String) -> Date? {
+        guard let pattern = obsNamePattern else { return nil }
+        let range = NSRange(name.startIndex..<name.endIndex, in: name)
+        guard let m = pattern.firstMatch(in: name, range: range), m.numberOfRanges == 7 else {
+            return nil
+        }
+
+        var numbers: [Int] = []
+        for i in 1..<7 {
+            guard let r = Range(m.range(at: i), in: name), let v = Int(name[r]) else { return nil }
+            numbers.append(v)
+        }
+
+        var components = DateComponents()
+        components.year = numbers[0]
+        components.month = numbers[1]
+        components.day = numbers[2]
+        components.hour = numbers[3]
+        components.minute = numbers[4]
+        components.second = numbers[5]
+        return Calendar(identifier: .gregorian).date(from: components)
     }
 
     static func parseFolderName(_ name: String) -> (Date?, String?) {
