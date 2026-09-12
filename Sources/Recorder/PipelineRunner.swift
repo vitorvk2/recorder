@@ -18,6 +18,7 @@ struct PipelineRunner {
     enum Failure: LocalizedError {
         case dockerMissing
         case pipelineDirMissing(String)
+        case servicesDown(String)
         case exited(code: Int32, output: String)
 
         var errorDescription: String? {
@@ -26,11 +27,24 @@ struct PipelineRunner {
                 return "Docker não encontrado. Abra o Docker Desktop e tente de novo."
             case .pipelineDirMissing(let path):
                 return "Pasta da pipeline não encontrada: \(path). Ajuste em Settings."
-            case .exited(let code, let output):
+            case .servicesDown(let output):
                 let tail = output
                     .split(separator: "\n")
-                    .suffix(6)
+                    .suffix(3)
                     .joined(separator: "\n")
+                return tail.isEmpty
+                    ? "Os serviços da pipeline não subiram."
+                    : tail
+            case .exited(let code, let output):
+                let lines = output
+                    .split(separator: "\n")
+                    .map { $0.trimmingCharacters(in: .whitespaces) }
+                // As etapas seguintes seguem imprimindo "nada para..." depois
+                // de uma falhar, entao a cauda crua esconde o motivo real.
+                if let reason = lines.last(where: { $0.contains("ERRO:") }) {
+                    return reason
+                }
+                let tail = lines.suffix(6).joined(separator: "\n")
                 return "Pipeline falhou (código \(code)):\n\(tail)"
             }
         }
@@ -69,6 +83,8 @@ struct PipelineRunner {
             try Self.writeMeta(folderURL: metaFolderURL, context: context)
         }
 
+        try ensureServices()
+
         let process = Process()
         process.executableURL = URL(fileURLWithPath: docker)
         process.arguments = [
@@ -95,6 +111,36 @@ struct PipelineRunner {
             throw Failure.exited(code: process.terminationStatus, output: output)
         }
         return output
+    }
+
+    private func ensureServices() throws {
+        let script = (pipelineDir as NSString).appendingPathComponent("hostsvc/ensure.sh")
+        guard FileManager.default.isReadableFile(atPath: script) else { return }
+
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/bin/bash")
+        process.arguments = [script]
+        process.currentDirectoryURL = URL(fileURLWithPath: pipelineDir)
+
+        var env = ProcessInfo.processInfo.environment
+        let home = NSHomeDirectory()
+        env["PATH"] = [
+            "\(home)/.local/bin", "/opt/homebrew/bin", "/usr/local/bin",
+            "/usr/bin", "/bin", "/usr/sbin", "/sbin",
+        ].joined(separator: ":")
+        process.environment = env
+
+        let pipe = Pipe()
+        process.standardOutput = pipe
+        process.standardError = pipe
+        try process.run()
+
+        let data = pipe.fileHandleForReading.readDataToEndOfFile()
+        process.waitUntilExit()
+
+        guard process.terminationStatus == 0 else {
+            throw Failure.servicesDown(String(decoding: data, as: UTF8.self))
+        }
     }
 
     static func discoverContexts(pipelineDir: String) -> [String] {
