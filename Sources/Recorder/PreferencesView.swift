@@ -95,7 +95,7 @@ private struct TranscriptionPreferences: View {
             } header: {
                 Text("Pipeline local")
             } footer: {
-                Text("Pasta do repo transcribe. O processamento roda todo aqui: Whisper transcreve, o modelo resume e a ata vai para o Notion.")
+                Text("Pasta do repo transcribe. O processamento roda todo aqui: Whisper transcreve, o modelo resume e a ata vira nota no Obsidian.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
@@ -114,7 +114,7 @@ private struct TranscriptionPreferences: View {
             } header: {
                 Text("Contexto")
             } footer: {
-                Text("As subpastas da raiz de mídia. É o contexto que decide onde a ata é organizada no Notion — criar uma pasta nova já a faz aparecer, sem configurar nada.")
+                Text("As subpastas da raiz de mídia. É o contexto que decide em que vault do Obsidian a ata vai: Funcional e Pedbot no Trabalho, English e Pessoal no Vitor. Pasta nova precisa de um destino no .env do transcribe, senão a ata fica pendente.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
@@ -123,14 +123,14 @@ private struct TranscriptionPreferences: View {
                 Toggle("Acionar a pipeline automaticamente ao salvar", isOn: $model.autoProcess)
                     .disabled(!model.pipelineIsReady)
                 Text(model.autoProcess
-                     ? "Cada gravação é processada e publicada no Notion assim que você salva."
+                     ? "Cada gravação é processada e gravada no Obsidian assim que você salva."
                      : "A gravação fica pronta e o botão Processar, no painel, a envia quando você quiser.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             } header: {
                 Text("Automático")
             } footer: {
-                Text("Desligado por padrão: a pipeline publica no Notion, e isso é um efeito maior do que gerar um arquivo local.")
+                Text("Desligado por padrão: a pipeline grava a ata no vault, e isso é um efeito maior do que gerar um arquivo local.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }

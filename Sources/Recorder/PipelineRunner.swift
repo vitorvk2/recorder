@@ -179,10 +179,10 @@ struct PipelineRunner {
 
         var kind: Kind
         var headline: String
-        var notionURL: URL?
+        var noteURL: URL?
     }
 
-    static let stepMarkers = ["[prep]", "[stt]", "[llm]", "[notion]"]
+    static let stepMarkers = ["[prep]", "[stt]", "[llm]", "[vault]", "[notion]"]
 
     static func outcome(from output: String) -> Outcome {
         let lines = output
@@ -190,25 +190,25 @@ struct PipelineRunner {
             .map { $0.trimmingCharacters(in: .whitespaces) }
 
         let url = lines
-            .last { $0.hasPrefix("https://notion.so/") }
+            .last { $0.hasPrefix("obsidian://") || $0.hasPrefix("https://notion.so/") }
             .flatMap(URL.init(string:))
 
         if let ok = lines.last(where: { $0.hasPrefix("ok \"") }) {
             let title = ok.dropFirst(4).dropLast(ok.hasSuffix("\"") ? 1 : 0)
-            return Outcome(kind: .published, headline: String(title), notionURL: url)
+            return Outcome(kind: .published, headline: String(title), noteURL: url)
         }
         if lines.contains(where: { $0.contains("sem_fala") }) {
             return Outcome(
                 kind: .noSpeech,
                 headline: "Sem fala detectável, não foi publicada",
-                notionURL: nil
+                noteURL: nil
             )
         }
         if let err = lines.last(where: { $0.contains("ERRO:") }) {
             return Outcome(
                 kind: .failed,
                 headline: String(err.drop(while: { $0 != "E" })),
-                notionURL: nil
+                noteURL: nil
             )
         }
         let didWork = lines.contains { line in
@@ -218,9 +218,9 @@ struct PipelineRunner {
             return Outcome(
                 kind: .nothingPending,
                 headline: "Nada pendente, tudo já estava publicado",
-                notionURL: nil
+                noteURL: nil
             )
         }
-        return Outcome(kind: .processed, headline: "Processada", notionURL: url)
+        return Outcome(kind: .processed, headline: "Processada", noteURL: url)
     }
 }
