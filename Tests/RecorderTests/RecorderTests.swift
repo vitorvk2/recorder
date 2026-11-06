@@ -227,25 +227,27 @@ final class RecorderTests: XCTestCase {
                 model.queuedTranscriptions = [try pending("Próxima")]
                 model.pendingTranscriptions = [try pending("Manual")]
             }
-            for appearance in [NSAppearance.Name.aqua, .darkAqua] {
-                let view = NSHostingView(rootView: RecorderPanel().environment(model))
-                view.appearance = NSAppearance(named: appearance)
-                let size = view.fittingSize
-                XCTAssertEqual(size.width, 400, accuracy: 1)
-                XCTAssertLessThanOrEqual(size.height, 740)
-                let window = NSWindow(contentRect: NSRect(origin: .zero, size: size), styleMask: [.borderless], backing: .buffered, defer: false)
-                window.contentView = view
-                window.orderFront(nil)
-                view.layoutSubtreeIfNeeded()
-                view.displayIfNeeded()
-                try await Task.sleep(for: .milliseconds(100))
-                guard let bitmap = view.bitmapImageRepForCachingDisplay(in: view.bounds) else {
-                    return XCTFail("Could not render panel")
+            for section in RecorderPanel.PanelSection.allCases {
+                for appearance in [NSAppearance.Name.aqua, .darkAqua] {
+                    let view = NSHostingView(rootView: RecorderPanel(section: section).environment(model))
+                    view.appearance = NSAppearance(named: appearance)
+                    let size = view.fittingSize
+                    XCTAssertEqual(size.width, 380, accuracy: 1)
+                    XCTAssertLessThanOrEqual(size.height, 640)
+                    let window = NSWindow(contentRect: NSRect(origin: .zero, size: size), styleMask: [.borderless], backing: .buffered, defer: false)
+                    window.contentView = view
+                    window.orderFront(nil)
+                    view.layoutSubtreeIfNeeded()
+                    view.displayIfNeeded()
+                    try await Task.sleep(for: .milliseconds(100))
+                    guard let bitmap = view.bitmapImageRepForCachingDisplay(in: view.bounds) else {
+                        return XCTFail("Could not render panel")
+                    }
+                    view.cacheDisplay(in: view.bounds, to: bitmap)
+                    guard let png = bitmap.representation(using: .png, properties: [:]) else { return XCTFail("Could not encode panel") }
+                    try png.write(to: URL(fileURLWithPath: directory).appendingPathComponent("\(name)-\(section.rawValue)-\(appearance.rawValue).png"))
+                    window.orderOut(nil)
                 }
-                view.cacheDisplay(in: view.bounds, to: bitmap)
-                guard let png = bitmap.representation(using: .png, properties: [:]) else { return XCTFail("Could not encode panel") }
-                try png.write(to: URL(fileURLWithPath: directory).appendingPathComponent("\(name)-\(appearance.rawValue).png"))
-                window.orderOut(nil)
             }
         }
     }

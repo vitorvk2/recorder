@@ -118,9 +118,11 @@ Only after audio and metadata have finished writing is the folder renamed to its
 so the pipeline cannot import a live capture. If saving fails or the app exits unexpectedly,
 the raw files remain in that hidden folder for recovery (Finder: **Command–Shift–.**).
 
-The panel keeps recording controls and footer visible while the agenda, processing status
-and recording history scroll within the available screen height. History distinguishes a
-confirmed publication from a completed run, a failure, or a run with nothing pending.
+The panel uses native macOS popover vibrancy, grouped surfaces and a circular recording
+control. A segmented picker switches between agenda and recent recordings. Recording controls
+and footer stay visible while content scrolls within the available screen height. History
+distinguishes a confirmed publication from a completed run, a failure, or a run with nothing
+pending.
 
 Run the regression checks with full Xcode selected:
 

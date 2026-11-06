@@ -4,10 +4,10 @@ struct PreferencesView: View {
     var body: some View {
         TabView {
             GeneralPreferences()
-                .tabItem { Label("General", systemImage: "gearshape") }
+                .tabItem { Label("Geral", systemImage: "gearshape") }
 
             TranscriptionPreferences()
-                .tabItem { Label("Transcription", systemImage: "text.bubble") }
+                .tabItem { Label("Processamento", systemImage: "text.bubble") }
         }
         .frame(width: 480, height: 560)
     }
@@ -20,16 +20,16 @@ private struct GeneralPreferences: View {
         @Bindable var model = model
         Form {
             Section {
-                TextField("Your name", text: $model.localSpeakerName, prompt: Text("Optional"))
-                Text("Labels your voice — the microphone, on the right channel — when the transcript guesses who said what. Leave blank to omit.")
+                TextField("Seu nome", text: $model.localSpeakerName, prompt: Text("Opcional"))
+                Text("Ajuda a identificar sua voz, captada pelo microfone, na transcrição. Deixe em branco para não informar.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             } header: {
-                Text("Your name")
+                Text("Seu nome")
             }
 
             Section {
-                Toggle("Stop automatically after silence", isOn: $model.silenceAutoStopEnabled)
+                Toggle("Parar automaticamente após silêncio", isOn: $model.silenceAutoStopEnabled)
 
                 if model.silenceAutoStopEnabled {
                     Stepper(
@@ -39,26 +39,26 @@ private struct GeneralPreferences: View {
                         ),
                         in: 1...60
                     ) {
-                        Text("After \(Int((model.silenceTimeout / 60).rounded())) min of silence on both channels")
+                        Text("Após \(Int((model.silenceTimeout / 60).rounded())) min de silêncio nos dois canais")
                             .monospacedDigit()
                     }
 
                     VStack(alignment: .leading, spacing: 4) {
                         HStack {
-                            Text("Silence threshold")
+                            Text("Limite de silêncio")
                             Spacer()
                             Text("\(Int(model.silenceThresholdDB)) dB")
                                 .monospacedDigit()
                                 .foregroundStyle(.secondary)
                         }
                         Slider(value: $model.silenceThresholdDB, in: -80 ... -20, step: 1)
-                        Text("A channel counts as silent below this level. Lower = more tolerant of quiet rooms.")
+                        Text("O canal é considerado silencioso abaixo deste nível. Valores menores toleram sons mais baixos.")
                             .font(.caption)
                             .foregroundStyle(.secondary)
                     }
                 }
             } header: {
-                Text("Auto-stop")
+                Text("Parada automática")
             }
         }
         .formStyle(.grouped)
@@ -123,14 +123,14 @@ private struct TranscriptionPreferences: View {
                 Toggle("Acionar a pipeline automaticamente ao salvar", isOn: $model.autoProcess)
                     .disabled(!model.pipelineIsReady)
                 Text(model.autoProcess
-                     ? "Cada gravação é processada e gravada no Obsidian assim que você salva."
+                     ? "Cada gravação entra na fila de processamento assim que você salva."
                      : "A gravação fica pronta e o botão Processar, no painel, a envia quando você quiser.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             } header: {
                 Text("Automático")
             } footer: {
-                Text("Desligado por padrão: a pipeline grava a ata no vault, e isso é um efeito maior do que gerar um arquivo local.")
+                Text("O processamento transcreve, resume e publica a ata no destino do contexto escolhido.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
