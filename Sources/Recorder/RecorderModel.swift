@@ -71,13 +71,17 @@ final class RecorderModel {
     @ObservationIgnored private var pausedAt: Date?
     @ObservationIgnored private var pausedDuration: TimeInterval = 0
 
-    init(runPipeline: @escaping (PipelineRunner, PendingTranscription, PipelineRunner.Context) async throws -> String = { runner, pending, context in
+    @ObservationIgnored private let recoverPublicationsAutomatically: Bool
+
+    init(recoverPublicationsAutomatically: Bool = true, runPipeline: @escaping (PipelineRunner, PendingTranscription, PipelineRunner.Context) async throws -> String = { runner, pending, context in
         try await runner.run(metaFolderURL: pending.metaFolderURL, mediaURL: pending.audioURL, context: context)
     }) {
         self.runPipeline = runPipeline
+        self.recoverPublicationsAutomatically = recoverPublicationsAutomatically
     }
 
     var recentRecordings: [RecordingEntry] = []
+    var isLookingUpPublications = false
 
     @ObservationIgnored private let tap = SystemAudioTap()
     @ObservationIgnored private let mic = MicCapture()
@@ -486,6 +490,7 @@ final class RecorderModel {
                 try output.write(to: pending.logURL, atomically: true, encoding: .utf8)
                 guard let self else { return }
                 let outcome = PipelineRunner.outcome(from: output)
+                if let url = outcome.noteURL { try? PublicationStore.save(url, for: pending.logURL) }
                 self.lastTranscriptText = output
                 self.lastTranscriptURL = pending.logURL
                 self.lastOutcome = outcome
@@ -548,6 +553,51 @@ final class RecorderModel {
             limit: 6,
             obsRoot: PipelineRunner.mediaRoot(pipelineDir: pipelineDir)
         )
+        guard recoverPublicationsAutomatically else { return }
+        // Migrate existing successful logs to a durable publication record.
+        for entry in recentRecordings {
+            if let url = entry.noteURL { try? PublicationStore.save(url, for: entry.logURL) }
+        }
+        if pipelineIsReady { recoverPublishedNotes() }
+    }
+
+    func openPublishedNote(_ entry: RecordingEntry) {
+        if let url = entry.noteURL { NSWorkspace.shared.open(url) }
+        else { recoverPublishedNotes(openEntryID: entry.id) }
+    }
+
+    private func recoverPublishedNotes(openEntryID: String? = nil) {
+        guard !isLookingUpPublications else { return }
+        let entries = recentRecordings.filter { $0.noteURL == nil }
+        let mediaRoot = PipelineRunner.mediaRoot(pipelineDir: pipelineDir)
+        let requests = entries.compactMap { PublicationStore.request(for: $0, mediaRoot: mediaRoot) }
+        guard !requests.isEmpty else { return }
+        isLookingUpPublications = true
+        let directory = pipelineDir
+        Task { [weak self] in
+            defer { self?.isLookingUpPublications = false }
+            do {
+                let urls = try await Task.detached(priority: .utility) {
+                    let urls = try PublicationStore.lookup(requests, pipelineDir: directory)
+                    for entry in entries {
+                        if let url = urls[entry.id] { try? PublicationStore.save(url, for: entry.logURL) }
+                    }
+                    return urls
+                }.value
+                guard let self else { return }
+                for index in self.recentRecordings.indices {
+                    if let url = urls[self.recentRecordings[index].id] {
+                        self.recentRecordings[index].publicationURL = url
+                    }
+                }
+                if let id = openEntryID {
+                    if let url = urls[id] { NSWorkspace.shared.open(url) }
+                    else { self.statusMessage = "Esta gravação ainda não tem uma ata publicada na pipeline." }
+                }
+            } catch {
+                if openEntryID != nil { self?.statusMessage = error.localizedDescription }
+            }
+        }
     }
 
     func isScheduled(_ entry: RecordingEntry) -> Bool {

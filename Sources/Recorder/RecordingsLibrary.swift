@@ -32,6 +32,8 @@ struct RecordingEntry: Identifiable, Equatable {
     let stateIsKnown: Bool
 
     var processingOutcome: PipelineRunner.Outcome? = nil
+    var publicationURL: URL? = nil
+    var noteURL: URL? { publicationURL ?? processingOutcome?.noteURL }
 
     var hasTranscript: Bool { transcriptURL != nil }
 
@@ -68,14 +70,14 @@ enum RecordingsLibrary {
         return documents.appendingPathComponent("Recordings", isDirectory: true)
     }
 
-    static func recent(limit: Int, obsRoot: URL?) -> [RecordingEntry] {
-        let merged = recorderEntries() + obsEntries(root: obsRoot)
+    static func recent(limit: Int, obsRoot: URL?, recorderRoot: URL? = nil) -> [RecordingEntry] {
+        let merged = recorderEntries(root: recorderRoot ?? recordingsRoot()) + obsEntries(root: obsRoot)
         return Array(merged.sorted { $0.date > $1.date }.prefix(limit))
     }
 
-    private static func recorderEntries() -> [RecordingEntry] {
+    private static func recorderEntries(root: URL?) -> [RecordingEntry] {
         let fm = FileManager.default
-        guard let root = recordingsRoot(),
+        guard let root,
               let items = try? fm.contentsOfDirectory(
                 at: root,
                 includingPropertiesForKeys: [.isDirectoryKey, .creationDateKey, .contentModificationDateKey],
@@ -118,7 +120,8 @@ enum RecordingsLibrary {
                     atPath: url.appendingPathComponent("processed.m4a").path
                 ),
                 stateIsKnown: true,
-                processingOutcome: readOutcome(transcript)
+                processingOutcome: readOutcome(transcript),
+                publicationURL: PublicationStore.cachedURL(for: transcript)
             )
         }
     }
@@ -170,7 +173,8 @@ enum RecordingsLibrary {
                         context: contextURL.lastPathComponent,
                         isPrepared: false,
                         stateIsKnown: hasLog,
-                        processingOutcome: readOutcome(log)
+                        processingOutcome: readOutcome(log),
+                        publicationURL: PublicationStore.cachedURL(for: log)
                     )
                 )
             }

@@ -122,7 +122,9 @@ The panel uses native macOS popover vibrancy, grouped surfaces and a circular re
 control. A segmented picker switches between agenda and recent recordings. Recording controls
 and footer stay visible while content scrolls within the available screen height. History
 distinguishes a confirmed publication from a completed run, a failure, or a run with nothing
-pending.
+pending. Published destinations are saved beside each recording as `publication.json` (or
+`<media-name>.publication.json` for OBS). If an older log has lost its link, the app recovers
+it from the pipeline database through a read-only lookup; this does not rerun processing.
 
 Run the regression checks with full Xcode selected:
 

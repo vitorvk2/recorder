@@ -58,7 +58,7 @@ final class RecorderTests: XCTestCase {
 
     func testAutomaticProcessingIsSerialAndDeduplicated() async throws {
         let stub = PipelineStub()
-        let model = RecorderModel { _, pending, _ in try await stub.run(pending) }
+        let model = RecorderModel(recoverPublicationsAutomatically: false) { _, pending, _ in try await stub.run(pending) }
         model.pipelineIsReady = true
         let first = try pending("first")
         let second = try pending("second")
@@ -82,7 +82,7 @@ final class RecorderTests: XCTestCase {
 
     func testSavingWhileProcessingPreservesBothJobsAndTheirContexts() async throws {
         let stub = PipelineStub()
-        let model = RecorderModel { _, pending, _ in try await stub.run(pending) }
+        let model = RecorderModel(recoverPublicationsAutomatically: false) { _, pending, _ in try await stub.run(pending) }
         model.pipelineIsReady = true
         let first = try pending("first")
         let second = try pending("second", context: "Pedbot")
@@ -103,7 +103,7 @@ final class RecorderTests: XCTestCase {
 
     func testCompletionDoesNotInterruptANewRecording() async throws {
         let stub = PipelineStub()
-        let model = RecorderModel { _, pending, _ in try await stub.run(pending) }
+        let model = RecorderModel(recoverPublicationsAutomatically: false) { _, pending, _ in try await stub.run(pending) }
         model.pipelineIsReady = true
         let first = try pending("first")
         model.recordingDidSave(first, autoProcess: true)
@@ -118,7 +118,7 @@ final class RecorderTests: XCTestCase {
 
     func testFailureKeepsJobForRetryAndContinuesQueue() async throws {
         let stub = PipelineStub()
-        let model = RecorderModel { _, pending, _ in try await stub.run(pending) }
+        let model = RecorderModel(recoverPublicationsAutomatically: false) { _, pending, _ in try await stub.run(pending) }
         model.pipelineIsReady = true
         let first = try pending("first")
         let second = try pending("second")
@@ -140,7 +140,7 @@ final class RecorderTests: XCTestCase {
 
     func testDiscardingNewCapturePreservesRunningPipeline() async throws {
         let stub = PipelineStub()
-        let model = RecorderModel { _, pending, _ in try await stub.run(pending) }
+        let model = RecorderModel(recoverPublicationsAutomatically: false) { _, pending, _ in try await stub.run(pending) }
         model.pipelineIsReady = true
         let first = try pending("first")
         model.recordingDidSave(first, autoProcess: true)
@@ -159,7 +159,7 @@ final class RecorderTests: XCTestCase {
     }
 
     func testUnavailablePipelineKeepsPendingRecording() throws {
-        let model = RecorderModel()
+        let model = RecorderModel(recoverPublicationsAutomatically: false)
         let job = try pending("first")
         model.recordingDidSave(job, autoProcess: true)
         XCTAssertTrue(model.canProcessNow)
@@ -194,7 +194,7 @@ final class RecorderTests: XCTestCase {
         guard let directory = ProcessInfo.processInfo.environment["RECORDER_RENDER_DIR"] else { return }
         _ = NSApplication.shared
         try FileManager.default.createDirectory(atPath: directory, withIntermediateDirectories: true)
-        let model = RecorderModel()
+        let model = RecorderModel(recoverPublicationsAutomatically: false)
         // Populate only in memory; no real recording, pipeline or calendar requests.
         model.availableContexts = ["Funcional", "Pedbot", "Pessoal"]
         let previousContext = Preferences.lastContext

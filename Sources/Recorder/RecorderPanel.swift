@@ -368,15 +368,15 @@ struct RecorderPanel: View {
             .onDrag { recentDragProvider(entry) }
             .help("\(entry.displayTitle)\nArraste o arquivo ou use o menu de ações.")
             Menu {
-                if let url = entry.processingOutcome?.noteURL {
+                if let url = entry.noteURL {
                     Link(destination: url) {
                         Label(url.scheme == "obsidian" ? "Abrir no Obsidian" : "Abrir no Notion",
                               systemImage: "arrow.up.forward.square")
                     }
                 } else {
-                    Button("Abrir ata") {}
-                        .disabled(true)
-                        .help("O link da ata ainda não está disponível nesta gravação.")
+                    Button("Abrir ata…") { model.openPublishedNote(entry) }
+                        .disabled(model.isLookingUpPublications)
+                        .help("Localiza a ata publicada no Obsidian ou no Notion, sem reprocessar a gravação.")
                 }
                 Divider()
                 if let log = entry.transcriptURL {
@@ -416,6 +416,7 @@ struct RecorderPanel: View {
 
     private func recentIcon(_ entry: RecordingEntry) -> String {
         if model.isScheduled(entry) { return "clock.arrow.circlepath" }
+        if entry.noteURL != nil { return "checkmark.circle.fill" }
         switch entry.processingOutcome?.kind {
         case .published: return "checkmark.circle.fill"
         case .failed: return "exclamationmark.triangle"
@@ -426,6 +427,7 @@ struct RecorderPanel: View {
 
     private func recentTint(_ entry: RecordingEntry) -> Color {
         if model.isScheduled(entry) { return .blue }
+        if entry.noteURL != nil { return .green }
         switch entry.processingOutcome?.kind {
         case .published: return .green
         case .failed, .noSpeech: return .orange
@@ -437,7 +439,7 @@ struct RecorderPanel: View {
         if model.activeTranscription?.audioURL == entry.audioURL { return "Processando" }
         if model.isScheduled(entry) { return "Na fila" }
         let status: String
-        switch entry.processingOutcome?.kind {
+        switch entry.noteURL != nil ? .published : entry.processingOutcome?.kind {
         case .published: status = "Publicada"
         case .failed: status = "Falha no processamento"
         case .noSpeech: status = "Sem fala detectada"
