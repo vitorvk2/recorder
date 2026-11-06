@@ -136,7 +136,7 @@ struct RecorderPanel: View {
             .disabled(!model.pipelineIsReady)
             .keyboardShortcut("p", modifiers: [.command])
             .help(model.pipelineIsReady
-                  ? "Transcreve, resume e grava a ata no Obsidian"
+                  ? "Transcreve, resume e publica no Notion pessoal ou no Obsidian de trabalho"
                   : "Abra o Docker Desktop e confira a pasta em Settings")
         }
         .padding(10)
@@ -188,7 +188,7 @@ struct RecorderPanel: View {
                     .fixedSize(horizontal: false, vertical: true)
                 if let url = outcome.noteURL {
                     Link(destination: url) {
-                        Label("Abrir no Obsidian", systemImage: "arrow.up.forward.square")
+                        Label(url.scheme == "obsidian" ? "Abrir no Obsidian" : "Abrir no Notion", systemImage: "arrow.up.forward.square")
                             .font(.caption)
                     }
                 }

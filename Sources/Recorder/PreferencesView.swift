@@ -95,7 +95,7 @@ private struct TranscriptionPreferences: View {
             } header: {
                 Text("Pipeline local")
             } footer: {
-                Text("Pasta do repo transcribe. O processamento roda todo aqui: Whisper transcreve, o modelo resume e a ata vira nota no Obsidian.")
+                Text("Pasta do repo transcribe. Whisper transcreve, o modelo resume e a ata pessoal vai ao Notion por MCP. Atas de trabalho continuam no Obsidian.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
@@ -114,7 +114,7 @@ private struct TranscriptionPreferences: View {
             } header: {
                 Text("Contexto")
             } footer: {
-                Text("As subpastas da raiz de mídia. É o contexto que decide em que vault do Obsidian a ata vai: Funcional e Pedbot no Trabalho, English e Pessoal no Vitor. Pasta nova precisa de um destino no .env do transcribe, senão a ata fica pendente.")
+                Text("As subpastas da raiz de mídia. O contexto decide o destino: Funcional e Pedbot no Obsidian Trabalho, English e Pessoal no Notion. Pasta nova precisa de um destino no .env do transcribe, senão a ata fica pendente.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
