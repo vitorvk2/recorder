@@ -13,6 +13,11 @@ set -e
 
 cd "$(dirname "$0")"
 
+# Recent SDKs ship SwiftUI macros with full Xcode, not Command Line Tools.
+if [ -z "${DEVELOPER_DIR:-}" ] && [ -d "/Applications/Xcode.app/Contents/Developer" ]; then
+    export DEVELOPER_DIR="/Applications/Xcode.app/Contents/Developer"
+fi
+
 APP="Recorder.app"
 CONTENTS="$APP/Contents"
 MACOS="$CONTENTS/MacOS"
@@ -27,7 +32,8 @@ rm -rf "$APP"
 mkdir -p "$MACOS"
 mkdir -p "$RESOURCES"
 
-cp ".build/release/Recorder" "$MACOS/Recorder"
+BUILD_BIN_DIR="$(swift build -c release --show-bin-path)"
+cp "$BUILD_BIN_DIR/Recorder" "$MACOS/Recorder"
 cp "Info.plist" "$CONTENTS/Info.plist"
 
 # App icon (built from icon.swift via make-icon.sh). Optional: skip if absent.

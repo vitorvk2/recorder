@@ -31,6 +31,8 @@ struct RecordingEntry: Identifiable, Equatable {
 
     let stateIsKnown: Bool
 
+    var processingOutcome: PipelineRunner.Outcome? = nil
+
     var hasTranscript: Bool { transcriptURL != nil }
 
     var displayTitle: String {
@@ -115,7 +117,8 @@ enum RecordingsLibrary {
                 isPrepared: fm.fileExists(
                     atPath: url.appendingPathComponent("processed.m4a").path
                 ),
-                stateIsKnown: true
+                stateIsKnown: true,
+                processingOutcome: readOutcome(transcript)
             )
         }
     }
@@ -166,12 +169,18 @@ enum RecordingsLibrary {
                         legacyTextURL: hasLegacy ? legacy : nil,
                         context: contextURL.lastPathComponent,
                         isPrepared: false,
-                        stateIsKnown: hasLog
+                        stateIsKnown: hasLog,
+                        processingOutcome: readOutcome(log)
                     )
                 )
             }
         }
         return out
+    }
+
+    private static func readOutcome(_ url: URL) -> PipelineRunner.Outcome? {
+        guard let output = try? String(contentsOf: url, encoding: .utf8) else { return nil }
+        return PipelineRunner.outcome(from: output)
     }
 
     static func parseObsName(_ name: String) -> Date? {

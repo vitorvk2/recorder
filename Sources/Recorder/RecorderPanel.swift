@@ -4,344 +4,276 @@ import AppKit
 struct RecorderPanel: View {
     @Environment(RecorderModel.self) private var model
 
-    private let panelWidth: CGFloat = 340
+    private var panelHeight: CGFloat {
+        min(740, max(420, (NSScreen.main?.visibleFrame.height ?? 800) - 48))
+    }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 14) {
+        VStack(spacing: 0) {
             header
-
-            actionZone
-
-            Divider()
-
-            meters
+            captureSection
+                .padding(.horizontal, 20)
+                .padding(.bottom, 18)
 
             Divider()
-
-            meetingsSection
-
-            if !model.recentRecordings.isEmpty {
-                Divider()
-                recentSection
+            ScrollView {
+                VStack(alignment: .leading, spacing: 22) {
+                    if hasProcessingActivity { processingSection }
+                    meetingsSection
+                    recentSection
+                }
+                .padding(20)
+                .frame(maxWidth: .infinity, alignment: .leading)
             }
-
+            .scrollIndicators(.automatic)
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            Divider()
             footer
         }
-        .padding(14)
-        .frame(width: panelWidth)
+        .frame(width: 400, height: panelHeight)
+        .background(Color(nsColor: .windowBackgroundColor))
     }
 
     private var header: some View {
-        HStack(alignment: .firstTextBaseline, spacing: 10) {
-            Image(systemName: stateSymbolName)
-                .foregroundStyle(stateColor)
-                .font(.system(size: 14, weight: .semibold))
-                .symbolRenderingMode(.hierarchical)
-
-            Text(stateLabel)
-                .font(.headline)
-
-            Spacer(minLength: 8)
-
-            if model.state != .idle {
-                Text(formattedElapsed(model.elapsed))
-                    .font(.system(.title3, design: .monospaced))
-                    .foregroundStyle(model.state == .paused ? .secondary : .primary)
-                    .monospacedDigit()
+        HStack {
+            Label("Recorder", systemImage: "waveform")
+                .font(.system(size: 15, weight: .semibold))
+            Spacer()
+            HStack(spacing: 6) {
+                Circle().fill(stateColor).frame(width: 6, height: 6)
+                Text(stateLabel).font(.system(size: 11, weight: .medium))
             }
+            .padding(.horizontal, 9)
+            .padding(.vertical, 5)
+            .background(stateColor.opacity(0.10), in: Capsule())
         }
+        .padding(20)
     }
 
-    @ViewBuilder
-    private var actionZone: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            switch model.state {
-            case .idle:
-                if !model.availableContexts.isEmpty {
-                    contextRow
-                }
-                if model.transcriptionState == .running {
-                    runningRow
-                } else if let outcome = model.lastOutcome {
-                    resultRow(outcome)
-                    recordButton(prominent: true)
-                } else if model.canProcessNow {
-                    pendingRow
-                    recordButton(prominent: false)
+    private var captureSection: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            VStack(alignment: .leading, spacing: 4) {
+                if model.state == .idle {
+                    Text("Nova gravação")
+                        .font(.system(size: 24, weight: .semibold))
+                    Text("Áudio do sistema e microfone")
+                        .font(.system(size: 12))
+                        .foregroundStyle(.secondary)
                 } else {
-                    recordButton(prominent: true)
+                    Text(formattedElapsed(model.elapsed))
+                        .font(.system(size: 32, weight: .medium, design: .rounded))
+                        .monospacedDigit()
+                        .foregroundStyle(model.state == .paused ? .secondary : .primary)
+                    Text(model.currentSession?.meetingTitle ?? "Gravação em andamento")
+                        .font(.system(size: 12))
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                        .help(model.currentSession?.meetingTitle ?? "Gravação em andamento")
                 }
+            }
+            .frame(height: 58, alignment: .leading)
 
-            case .recording, .paused:
+            contextRow
+
+            if model.state == .idle {
+                Button { model.startRecording(meeting: nil) } label: {
+                    Label("Iniciar gravação", systemImage: "record.circle")
+                        .font(.system(size: 14, weight: .semibold))
+                        .frame(maxWidth: .infinity, minHeight: 34)
+                }
+                .buttonStyle(.borderedProminent)
+                .tint(.red)
+                .controlSize(.large)
+                .keyboardShortcut("r", modifiers: [.command])
+            } else {
                 recordingControls
+            }
+
+            HStack(spacing: 20) {
+                LevelMeter(label: "Sistema", symbol: "speaker.wave.2", level: model.desktopLevel, tint: .teal)
+                LevelMeter(label: "Microfone", symbol: "mic", level: model.micLevel, tint: .blue)
+            }
+
+            if let message = model.statusMessage {
+                HStack(alignment: .top, spacing: 6) {
+                    Image(systemName: "info.circle")
+                    Text(message).lineLimit(2)
+                }
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .help(message)
             }
         }
     }
 
     private var contextRow: some View {
-        HStack(spacing: 8) {
-            Text("Gravar em")
-                .font(.caption)
-                .foregroundStyle(.secondary)
-            Picker("", selection: Binding(
-                get: { model.selectedContext },
-                set: { model.selectedContext = $0 }
-            )) {
-                ForEach(model.availableContexts, id: \.self) { Text($0).tag($0) }
-            }
-            .labelsHidden()
-            .fixedSize()
-            Spacer()
-        }
-    }
-
-    @ViewBuilder
-    private func recordButton(prominent: Bool) -> some View {
-        let label = Label("Gravar", systemImage: "record.circle.fill")
-            .frame(maxWidth: .infinity)
-        if prominent {
-            Button { model.startRecording(meeting: nil) } label: { label }
-                .controlSize(.large)
-                .buttonStyle(.borderedProminent)
-                .tint(.red)
-                .keyboardShortcut("r", modifiers: [.command])
-        } else {
-            Button { model.startRecording(meeting: nil) } label: { label }
-                .controlSize(.large)
-                .buttonStyle(.bordered)
-                .tint(.red)
-                .keyboardShortcut("r", modifiers: [.command])
-        }
-    }
-
-    private var pendingRow: some View {
         HStack(spacing: 10) {
-            Image(systemName: "waveform")
-                .foregroundStyle(.secondary)
-            VStack(alignment: .leading, spacing: 1) {
-                Text("Gravação pronta")
-                    .font(.callout.weight(.medium))
-                Text(model.pendingContext.isEmpty ? "sem contexto" : model.pendingContext)
-                    .font(.caption2)
-                    .foregroundStyle(.secondary)
-            }
+            Image(systemName: "folder").foregroundStyle(.secondary)
+            Text("Contexto").foregroundStyle(.secondary)
             Spacer(minLength: 8)
-            Button {
-                model.processLastRecording()
-            } label: {
-                Text("Processar")
+            if model.availableContexts.isEmpty {
+                Button("Configurar") { openPreferences() }
+                    .buttonStyle(.borderless)
+            } else {
+                Picker("Contexto da gravação", selection: Binding(
+                    get: { model.selectedContext }, set: { model.selectedContext = $0 }
+                )) {
+                    ForEach(model.availableContexts, id: \.self) { context in
+                        Text(context).tag(context)
+                    }
+                }
+                .labelsHidden()
+                .frame(maxWidth: 220)
+                .disabled(model.state != .idle)
+                .help("Destino da próxima gravação")
+            }
+        }
+        .font(.system(size: 12))
+        .frame(height: 28)
+    }
+
+    private var recordingControls: some View {
+        HStack(spacing: 8) {
+            Button { model.togglePause() } label: {
+                Label(model.state == .paused ? "Continuar" : "Pausar",
+                      systemImage: model.state == .paused ? "play.fill" : "pause.fill")
+                    .frame(maxWidth: .infinity, minHeight: 34)
+            }
+            .buttonStyle(.bordered)
+            Button { model.saveAndStop() } label: {
+                Label("Salvar", systemImage: "stop.fill")
+                    .frame(maxWidth: .infinity, minHeight: 34)
             }
             .buttonStyle(.borderedProminent)
-            .tint(.indigo)
-            .disabled(!model.pipelineIsReady)
-            .keyboardShortcut("p", modifiers: [.command])
-            .help(model.pipelineIsReady
-                  ? "Transcreve, resume e publica no Notion pessoal ou no Obsidian de trabalho"
-                  : "Abra o Docker Desktop e confira a pasta em Settings")
-        }
-        .padding(10)
-        .background(Color.secondary.opacity(0.10), in: RoundedRectangle(cornerRadius: 8))
-    }
-
-    private var runningRow: some View {
-        HStack(spacing: 10) {
-            ProgressView().controlSize(.small)
-            VStack(alignment: .leading, spacing: 1) {
-                Text("Processando…")
-                    .font(.callout.weight(.medium))
-                Text("transcrevendo, resumindo e publicando")
-                    .font(.caption2)
-                    .foregroundStyle(.secondary)
+            .tint(.blue)
+            Button(role: .destructive) { model.trashAndStop() } label: {
+                Image(systemName: "trash").frame(minHeight: 34)
             }
-            Spacer()
+            .buttonStyle(.bordered)
+            .help("Descartar esta gravação")
+            .accessibilityLabel("Descartar gravação")
         }
-        .padding(10)
-        .background(Color.secondary.opacity(0.10), in: RoundedRectangle(cornerRadius: 8))
+        .controlSize(.large)
     }
 
-    private func outcomeIcon(_ kind: PipelineRunner.Outcome.Kind) -> String {
-        switch kind {
-        case .published, .processed: return "checkmark.circle.fill"
-        case .nothingPending: return "info.circle.fill"
-        case .noSpeech: return "exclamationmark.circle.fill"
-        case .failed: return "exclamationmark.triangle.fill"
-        }
+    private var hasProcessingActivity: Bool {
+        model.mixingCount > 0 || model.transcriptionState == .running || model.canProcessNow
+            || (model.lastOutcome != nil && model.lastOutcome?.kind != .nothingPending) || processingError != nil
     }
 
-    private func outcomeTint(_ kind: PipelineRunner.Outcome.Kind) -> Color {
-        switch kind {
-        case .published, .processed: return .green
-        case .nothingPending: return .secondary
-        case .noSpeech: return .orange
-        case .failed: return .red
+    private var processingError: String? {
+        if case .failed(let message) = model.transcriptionState { return message }
+        return nil
+    }
+
+    private var processingSection: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            if model.mixingCount > 0 {
+                activityRow(symbol: "waveform", title: "Salvando áudio…", detail: "Você já pode iniciar outra gravação.")
+            }
+            if model.transcriptionState == .running {
+                HStack(spacing: 10) {
+                    ProgressView().controlSize(.small).frame(width: 18)
+                    VStack(alignment: .leading, spacing: 3) {
+                        Text("Processando em segundo plano")
+                            .font(.system(size: 12, weight: .semibold))
+                        Text(model.processingTitle).font(.caption).foregroundStyle(.secondary).lineLimit(1)
+                        if !model.queuedTranscriptions.isEmpty {
+                            Text("\(model.queuedTranscriptions.count) na fila")
+                                .font(.caption).foregroundStyle(.secondary)
+                        }
+                    }
+                    Spacer(minLength: 0)
+                }
+            } else if let error = processingError {
+                HStack(alignment: .top, spacing: 10) {
+                    Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(.orange)
+                    VStack(alignment: .leading, spacing: 3) {
+                        Text("Não foi possível processar").font(.system(size: 12, weight: .semibold))
+                        Text(error).font(.caption).foregroundStyle(.secondary).lineLimit(2).help(error)
+                    }
+                    Spacer(minLength: 0)
+                    Button { openPreferences() } label: { Image(systemName: "gearshape") }
+                        .buttonStyle(.borderless).help("Abrir ajustes")
+                }
+            } else if let outcome = model.lastOutcome, outcome.kind != .nothingPending {
+                resultRow(outcome)
+            }
+            if model.canProcessNow {
+                HStack(spacing: 10) {
+                    Image(systemName: "waveform.badge.plus").foregroundStyle(.blue).frame(width: 18)
+                    VStack(alignment: .leading, spacing: 3) {
+                        Text(model.pendingTranscriptions.count == 1 ? "Gravação pronta" : "\(model.pendingTranscriptions.count) gravações prontas")
+                            .font(.system(size: 12, weight: .semibold))
+                        Text(model.pendingContext.isEmpty ? "Escolha um contexto nos Ajustes" : model.pendingContext)
+                            .font(.caption).foregroundStyle(.secondary).lineLimit(1)
+                    }
+                    Spacer(minLength: 0)
+                    Button(model.transcriptionState == .running ? "Enfileirar" : "Processar") {
+                        model.processLastRecording()
+                    }
+                    .buttonStyle(.bordered)
+                    .disabled(!model.pipelineIsReady)
+                    .keyboardShortcut("p", modifiers: [.command])
+                }
+            }
+        }
+        .padding(12)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 10))
+        .overlay(RoundedRectangle(cornerRadius: 10).strokeBorder(.primary.opacity(0.06)))
+    }
+
+    private func activityRow(symbol: String, title: String, detail: String) -> some View {
+        HStack(spacing: 10) {
+            Image(systemName: symbol).foregroundStyle(.secondary).frame(width: 18)
+            VStack(alignment: .leading, spacing: 3) {
+                Text(title).font(.system(size: 12, weight: .semibold))
+                Text(detail).font(.caption).foregroundStyle(.secondary)
+            }
         }
     }
 
     private func resultRow(_ outcome: PipelineRunner.Outcome) -> some View {
         HStack(alignment: .top, spacing: 10) {
-            Image(systemName: outcomeIcon(outcome.kind))
-                .foregroundStyle(outcomeTint(outcome.kind))
-            VStack(alignment: .leading, spacing: 3) {
-                Text(outcome.headline)
-                    .font(.callout)
-                    .lineLimit(2)
-                    .fixedSize(horizontal: false, vertical: true)
+            Image(systemName: outcome.kind == .noSpeech ? "waveform.slash" : "checkmark.circle.fill")
+                .foregroundStyle(outcome.kind == .noSpeech ? Color.orange : Color.green)
+                .frame(width: 18)
+            VStack(alignment: .leading, spacing: 4) {
+                Text(outcome.headline).font(.system(size: 12, weight: .medium)).lineLimit(2).help(outcome.headline)
                 if let url = outcome.noteURL {
-                    Link(destination: url) {
-                        Label(url.scheme == "obsidian" ? "Abrir no Obsidian" : "Abrir no Notion", systemImage: "arrow.up.forward.square")
-                            .font(.caption)
-                    }
+                    Link(url.scheme == "obsidian" ? "Abrir no Obsidian" : "Abrir no Notion", destination: url)
+                        .font(.caption)
                 }
             }
-            Spacer(minLength: 4)
+            Spacer(minLength: 0)
             Menu {
                 Button("Copiar log") { model.copyTranscriptText() }
                 Button("Mostrar no Finder") { model.revealTranscript() }
-                if model.pipelineIsReady {
-                    Divider()
-                    Button("Processar de novo") { model.retryTranscription() }
-                }
-            } label: {
-                Image(systemName: "ellipsis.circle")
-            }
-            .menuStyle(.borderlessButton)
-            .menuIndicator(.hidden)
-            .fixedSize()
-        }
-        .padding(10)
-        .background(Color.secondary.opacity(0.10), in: RoundedRectangle(cornerRadius: 8))
-    }
-
-    private var recordingControls: some View {
-        HStack(spacing: 8) {
-            Button {
-                model.togglePause()
-            } label: {
-                Label(
-                    model.state == .paused ? "Continuar" : "Pausar",
-                    systemImage: model.state == .paused ? "play.fill" : "pause.fill"
-                )
-                .frame(maxWidth: .infinity)
-            }
-            .controlSize(.large)
-            .buttonStyle(.bordered)
-            .tint(.orange)
-
-            Button {
-                model.saveAndStop()
-            } label: {
-                Label("Salvar", systemImage: "stop.fill")
-                    .frame(maxWidth: .infinity)
-            }
-            .controlSize(.large)
-            .buttonStyle(.borderedProminent)
-            .tint(.blue)
-
-            Button(role: .destructive) {
-                model.trashAndStop()
-            } label: {
-                Image(systemName: "trash")
-            }
-            .controlSize(.large)
-            .buttonStyle(.bordered)
-            .tint(.red)
-            .help("Descartar esta gravação")
-        }
-    }
-
-    private var stateLabel: String {
-        switch model.state {
-        case .idle:      return "Pronto"
-        case .recording: return "Gravando"
-        case .paused:    return "Pausado"
-        }
-    }
-
-    private var stateSymbolName: String {
-        switch model.state {
-        case .idle:      return "circle"
-        case .recording: return "record.circle.fill"
-        case .paused:    return "pause.circle.fill"
-        }
-    }
-
-    private var stateColor: Color {
-        switch model.state {
-        case .idle:      return .secondary
-        case .recording: return .red
-        case .paused:    return .orange
-        }
-    }
-
-    private func transcriptDragHandle(_ url: URL) -> some View {
-        let folder = url.deletingLastPathComponent().lastPathComponent
-        return HStack(spacing: 6) {
-            Image(systemName: "line.3.horizontal")
-                .foregroundStyle(.tertiary)
-                .font(.caption)
-            Image(systemName: "doc.text")
-                .foregroundStyle(.secondary)
-            Text(url.lastPathComponent)
-                .font(.caption)
-                .lineLimit(1)
-                .truncationMode(.middle)
-            Spacer(minLength: 4)
-            Image(systemName: "arrow.up.forward.app")
-                .foregroundStyle(.tertiary)
-                .font(.caption)
-        }
-        .padding(.vertical, 5)
-        .padding(.horizontal, 8)
-        .background(
-            RoundedRectangle(cornerRadius: 6, style: .continuous)
-                .fill(Color.primary.opacity(0.06))
-        )
-        .contentShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
-        .onDrag {
-            NSItemProvider(contentsOf: url) ?? NSItemProvider()
-        } preview: {
-            Label(url.lastPathComponent, systemImage: "doc.text")
-                .padding(8)
-        }
-        .help("Drag \(folder)/\(url.lastPathComponent) into another app or window")
-    }
-
-    private var meters: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            LevelMeter(label: "Sistema",   level: model.desktopLevel, tint: .green)
-            LevelMeter(label: "Microfone", level: model.micLevel,     tint: .blue)
+                Button("Processar novamente") { model.retryTranscription() }.disabled(!model.pipelineIsReady)
+            } label: { Image(systemName: "ellipsis") }
+            .menuStyle(.borderlessButton).menuIndicator(.hidden).fixedSize()
+            .accessibilityLabel("Ações do processamento")
         }
     }
 
     private var meetingsSection: some View {
-        VStack(alignment: .leading, spacing: 6) {
+        VStack(alignment: .leading, spacing: 10) {
             HStack {
-                Text("Agenda")
-                    .font(.subheadline.weight(.semibold))
+                sectionTitle("Agenda", symbol: "calendar")
                 Spacer()
-                Button {
-                    model.refreshMeetings()
-                } label: {
-                    Image(systemName: "arrow.clockwise")
-                }
-                .buttonStyle(.borderless)
-                .help("Refresh meetings")
+                Button { model.refreshMeetings() } label: { Image(systemName: "arrow.clockwise") }
+                    .buttonStyle(.borderless).help("Atualizar agenda").accessibilityLabel("Atualizar agenda")
             }
-
             if model.meetings.isEmpty {
-                Text("No meetings nearby.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .padding(.vertical, 2)
+                Text("Nenhuma reunião por perto.")
+                    .font(.system(size: 12)).foregroundStyle(.secondary).padding(.vertical, 6)
             } else {
-                VStack(spacing: 4) {
+                VStack(spacing: 2) {
                     ForEach(model.meetings) { meeting in
-                        MeetingRow(
-                            meeting: meeting,
-                            inProgress: meeting.isInProgress(Date()),
-                            canStart: model.state == .idle,
-                            onRecord: { model.startRecording(meeting: meeting) }
-                        )
+                        MeetingRow(meeting: meeting, inProgress: meeting.isInProgress(Date()),
+                                   canStart: model.state == .idle,
+                                   onRecord: { model.startRecording(meeting: meeting) })
                     }
                 }
             }
@@ -349,207 +281,192 @@ struct RecorderPanel: View {
     }
 
     private var recentSection: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            Text("Gravações recentes")
-                .font(.subheadline.weight(.semibold))
-
-            VStack(spacing: 2) {
-                ForEach(model.recentRecordings) { entry in
-                    recentRow(entry)
+        VStack(alignment: .leading, spacing: 10) {
+            HStack {
+                sectionTitle("Gravações recentes", symbol: "clock")
+                Spacer()
+                Button("Ver pasta") { model.openRecordingsFolder() }
+                    .font(.caption).buttonStyle(.borderless)
+            }
+            if model.recentRecordings.isEmpty {
+                Text("Suas gravações salvas aparecem aqui.")
+                    .font(.system(size: 12)).foregroundStyle(.secondary).padding(.vertical, 6)
+            } else {
+                VStack(spacing: 0) {
+                    ForEach(model.recentRecordings) { entry in
+                        recentRow(entry)
+                        if entry.id != model.recentRecordings.last?.id {
+                            Divider().padding(.leading, 36)
+                        }
+                    }
                 }
             }
         }
     }
 
-    @ViewBuilder
+    private func sectionTitle(_ title: String, symbol: String) -> some View {
+        Label(title, systemImage: symbol)
+            .font(.system(size: 12, weight: .semibold))
+            .foregroundStyle(.secondary)
+    }
+
     private func recentRow(_ entry: RecordingEntry) -> some View {
-        HStack(spacing: 8) {
-            HStack(spacing: 8) {
+        HStack(spacing: 10) {
+            HStack(spacing: 10) {
                 Image(systemName: recentIcon(entry))
-                    .foregroundStyle(entry.hasTranscript ? Color.accentColor : Color.secondary)
-
-                VStack(alignment: .leading, spacing: 1) {
+                    .font(.system(size: 16))
+                    .foregroundStyle(recentTint(entry))
+                    .frame(width: 26, height: 32)
+                VStack(alignment: .leading, spacing: 4) {
                     Text(entry.displayTitle)
-                        .font(.callout)
-                        .lineLimit(1)
-                        .truncationMode(.tail)
-                    Text(recentSubtitle(entry))
-                        .font(.caption2)
-                        .foregroundStyle(.secondary)
+                        .font(.system(size: 12, weight: .medium))
+                        .lineLimit(1).truncationMode(.middle)
+                    Text(entry.date, format: .dateTime.day().month().hour().minute())
+                        .font(.system(size: 11)).foregroundStyle(.secondary)
+                    Text(recentStatus(entry))
+                        .font(.system(size: 10)).foregroundStyle(.secondary).lineLimit(1)
                 }
-
-                Spacer(minLength: 4)
-
-                if entry.hasTranscript {
-                    Image(systemName: "line.3.horizontal")
-                        .foregroundStyle(.tertiary)
-                        .font(.caption)
-                }
+                Spacer(minLength: 0)
             }
             .contentShape(Rectangle())
             .onDrag { recentDragProvider(entry) }
-            .help(entry.hasTranscript
-                  ? "Drag the transcript out, or use ⋯ for more"
-                  : "Drag the audio out, or use ⋯ to transcribe")
-
+            .help("\(entry.displayTitle)\nArraste o arquivo ou use o menu de ações.")
             Menu {
-                if let transcript = entry.transcriptURL {
-                    Button { model.copyTextOfFile(transcript) } label: {
-                        Label("Copy transcript text", systemImage: "doc.on.clipboard")
+                if let log = entry.transcriptURL {
+                    Button("Copiar log do processamento") { model.copyTextOfFile(log) }
+                    Button("Copiar arquivo de log") { model.copyFileToPasteboard(log) }
+                }
+                if entry.audioURL != nil {
+                    Button(model.transcriptionState == .running ? "Adicionar à fila" : "Processar gravação") {
+                        model.transcribeExisting(entry)
                     }
-                    Button { model.copyFileToPasteboard(transcript) } label: {
-                        Label("Copy transcript file", systemImage: "doc.on.doc")
-                    }
-                } else if entry.audioURL != nil {
-                    Button { model.transcribeExisting(entry) } label: {
-                        Label("Processar na pipeline", systemImage: "gearshape.arrow.trianglehead.2.clockwise.rotate.90")
-                    }
-                    .disabled(!model.pipelineIsReady || model.transcriptionState == .running)
+                    .disabled(!model.pipelineIsReady || model.isScheduled(entry))
                 }
                 if let legacy = entry.legacyTextURL {
-                    Button { model.copyTextOfFile(legacy) } label: {
-                        Label("Copiar transcrição antiga", systemImage: "doc.plaintext")
-                    }
+                    Button("Copiar transcrição antiga") { model.copyTextOfFile(legacy) }
                 }
                 if let audio = entry.audioURL {
-                    Button { model.copyFileToPasteboard(audio) } label: {
-                        Label(
-                            entry.source == .obs ? "Copiar arquivo de vídeo" : "Copy audio file",
-                            systemImage: entry.source == .obs ? "film" : "waveform"
-                        )
+                    Button(entry.source == .obs ? "Copiar arquivo de vídeo" : "Copiar arquivo de áudio") {
+                        model.copyFileToPasteboard(audio)
                     }
                 }
                 Divider()
-                Button { model.reveal(entry.revealURL) } label: {
-                    Label("Reveal in Finder", systemImage: "folder")
-                }
+                Button("Mostrar no Finder") { model.reveal(entry.revealURL) }
             } label: {
-                Image(systemName: "ellipsis.circle")
+                Image(systemName: "ellipsis").frame(width: 24, height: 28)
             }
-            .menuStyle(.borderlessButton)
-            .menuIndicator(.hidden)
-            .fixedSize()
-            .help("Actions")
+            .menuStyle(.borderlessButton).menuIndicator(.hidden).fixedSize()
+            .accessibilityLabel("Ações de \(entry.displayTitle)")
         }
-        .padding(.vertical, 3)
-        .padding(.horizontal, 6)
-        .background(
-            RoundedRectangle(cornerRadius: 6, style: .continuous)
-                .fill(Color.primary.opacity(0.04))
-        )
+        .padding(.vertical, 10)
     }
 
     private func recentDragProvider(_ entry: RecordingEntry) -> NSItemProvider {
-        if let transcript = entry.transcriptURL {
-            return NSItemProvider(contentsOf: transcript) ?? NSItemProvider()
-        }
-        if let audio = entry.audioURL {
-            return NSItemProvider(contentsOf: audio) ?? NSItemProvider()
-        }
-        return NSItemProvider()
+        guard let url = entry.transcriptURL ?? entry.audioURL else { return NSItemProvider() }
+        return NSItemProvider(contentsOf: url) ?? NSItemProvider()
     }
 
     private func recentIcon(_ entry: RecordingEntry) -> String {
-        if entry.hasTranscript { return "checkmark.circle.fill" }
-        return entry.source == .obs ? "film.circle.fill" : "waveform.circle.fill"
+        if model.isScheduled(entry) { return "clock.arrow.circlepath" }
+        switch entry.processingOutcome?.kind {
+        case .published: return "checkmark.circle.fill"
+        case .failed: return "exclamationmark.triangle"
+        case .noSpeech: return "waveform.slash"
+        default: return entry.source == .obs ? "film" : "waveform"
+        }
     }
 
-    private func recentSubtitle(_ entry: RecordingEntry) -> String {
-        let formatter = DateFormatter()
-        formatter.dateStyle = .short
-        formatter.timeStyle = .short
-        let when = formatter.string(from: entry.date)
-
-        let origin = entry.source == .obs ? "OBS" : "Recorder"
-        var parts = [when]
-        if let context = entry.context, !context.isEmpty {
-            parts.append("\(origin)/\(context)")
-        } else {
-            parts.append(origin)
+    private func recentTint(_ entry: RecordingEntry) -> Color {
+        if model.isScheduled(entry) { return .blue }
+        switch entry.processingOutcome?.kind {
+        case .published: return .green
+        case .failed, .noSpeech: return .orange
+        default: return .secondary
         }
+    }
 
-        if entry.hasTranscript {
-            parts.append("publicada")
-        } else if entry.isPrepared {
-            parts.append("preparada")
-        } else if entry.stateIsKnown {
-            parts.append("não processada")
+    private func recentStatus(_ entry: RecordingEntry) -> String {
+        if model.activeTranscription?.audioURL == entry.audioURL { return "Processando" }
+        if model.isScheduled(entry) { return "Na fila" }
+        let status: String
+        switch entry.processingOutcome?.kind {
+        case .published: status = "Publicada"
+        case .failed: status = "Falha no processamento"
+        case .noSpeech: status = "Sem fala detectada"
+        case .processed: status = "Processada"
+        case .nothingPending: status = "Sem novas pendências"
+        case nil: status = entry.isPrepared ? "Preparada" : "Aguardando processamento"
         }
-
-        return parts.joined(separator: " · ")
+        return [entry.context, status].compactMap { $0 }.joined(separator: " · ")
     }
 
     private var footer: some View {
-        HStack(spacing: 14) {
-            Button {
-                model.openRecordingsFolder()
-            } label: {
-                Label("Gravações", systemImage: "folder")
-            }
-            .buttonStyle(.borderless)
-            .help("Open ~/Documents/Recordings in Finder")
-
+        HStack(spacing: 16) {
+            Button { model.openRecordingsFolder() } label: { Label("Gravações", systemImage: "folder") }
+                .buttonStyle(.borderless)
             Spacer()
+            Button { openPreferences() } label: { Image(systemName: "gearshape").frame(width: 24, height: 24) }
+                .buttonStyle(.borderless).help("Ajustes")
+                .accessibilityLabel("Ajustes").keyboardShortcut(",", modifiers: [.command])
+            Button { model.quit() } label: { Image(systemName: "power").frame(width: 24, height: 24) }
+                .buttonStyle(.borderless).help("Sair do Recorder")
+                .accessibilityLabel("Sair do Recorder").keyboardShortcut("q", modifiers: [.command])
+        }
+        .font(.system(size: 12))
+        .foregroundStyle(.secondary)
+        .padding(.horizontal, 20)
+        .padding(.vertical, 10)
+    }
 
-            Button {
-                openPreferences()
-            } label: {
-                Label("Ajustes…", systemImage: "gearshape")
-            }
-            .buttonStyle(.borderless)
-            .keyboardShortcut(",", modifiers: [.command])
-            .help("Open Preferences")
-
-            Button {
-                model.quit()
-            } label: {
-                Label("Sair", systemImage: "power")
-            }
-            .buttonStyle(.borderless)
-            .keyboardShortcut("q", modifiers: [.command])
+    private var stateLabel: String {
+        switch model.state {
+        case .idle: return "Pronto para gravar"
+        case .recording: return "Gravando"
+        case .paused: return "Em pausa"
         }
     }
 
-    private func openPreferences() {
-        PreferencesWindowController.shared.show(model: model)
+    private var stateColor: Color {
+        switch model.state {
+        case .idle: return .secondary
+        case .recording: return .red
+        case .paused: return .orange
+        }
     }
+
+    private func openPreferences() { PreferencesWindowController.shared.show(model: model) }
 
     private func formattedElapsed(_ interval: TimeInterval) -> String {
-        let total = Int(interval.rounded(.down))
-        let hours = total / 3600
-        let minutes = (total % 3600) / 60
-        let seconds = total % 60
-        if hours > 0 {
-            return String(format: "%d:%02d:%02d", hours, minutes, seconds)
-        }
-        return String(format: "%02d:%02d", minutes, seconds)
+        let total = max(0, Int(interval))
+        return total >= 3600
+            ? String(format: "%d:%02d:%02d", total / 3600, (total % 3600) / 60, total % 60)
+            : String(format: "%02d:%02d", total / 60, total % 60)
     }
 }
 
 private struct LevelMeter: View {
     let label: String
+    let symbol: String
     let level: Float
     let tint: Color
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 3) {
-            Text(label)
-                .font(.caption2)
-                .foregroundStyle(.secondary)
-
-            GeometryReader { geo in
-                let clamped = CGFloat(max(0, min(1, level)))
+        VStack(alignment: .leading, spacing: 6) {
+            Label(label, systemImage: symbol)
+                .font(.system(size: 10)).foregroundStyle(.secondary)
+            GeometryReader { geometry in
                 ZStack(alignment: .leading) {
-                    Capsule()
-                        .fill(Color.primary.opacity(0.12))
-                    Capsule()
-                        .fill(tint.gradient)
-                        .frame(width: max(2, geo.size.width * clamped))
-                        .animation(.linear(duration: 0.08), value: clamped)
+                    Capsule().fill(Color.primary.opacity(0.08))
+                    Capsule().fill(tint)
+                        .frame(width: geometry.size.width * CGFloat(max(0, min(1, level))))
                 }
             }
-            .frame(height: 8)
+            .frame(height: 4)
         }
+        .frame(maxWidth: .infinity)
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(label)
+        .accessibilityValue("\(Int(max(0, min(1, level)) * 100)) por cento")
     }
 }
 
@@ -560,45 +477,30 @@ private struct MeetingRow: View {
     let onRecord: () -> Void
 
     var body: some View {
-        HStack(spacing: 8) {
-            Circle()
-                .fill(inProgress ? Color.red : Color.clear)
-                .frame(width: 6, height: 6)
-
-            VStack(alignment: .leading, spacing: 1) {
-                Text(meeting.title)
-                    .font(.callout)
-                    .lineLimit(1)
-                    .truncationMode(.tail)
-                Text(timeRange(meeting.start, meeting.end))
-                    .font(.caption2)
-                    .foregroundStyle(.secondary)
+        HStack(spacing: 10) {
+            RoundedRectangle(cornerRadius: 2)
+                .fill(inProgress ? Color.blue : Color.primary.opacity(0.12))
+                .frame(width: 3, height: 32)
+            VStack(alignment: .leading, spacing: 4) {
+                Text(meeting.title).font(.system(size: 12, weight: .medium))
+                    .lineLimit(2).fixedSize(horizontal: false, vertical: true)
+                HStack(spacing: 6) {
+                    Text("\(meeting.start, format: .dateTime.hour().minute()) – \(meeting.end, format: .dateTime.hour().minute())")
+                    if inProgress { Text("Agora").foregroundStyle(.blue) }
+                }
+                .font(.system(size: 10)).foregroundStyle(.secondary)
             }
-
-            Spacer(minLength: 4)
-
-            Button {
-                onRecord()
-            } label: {
-                Image(systemName: "record.circle")
+            Spacer(minLength: 0)
+            Button(action: onRecord) {
+                Image(systemName: "record.circle").font(.system(size: 19))
                     .foregroundStyle(canStart ? Color.red : Color.secondary)
+                    .frame(width: 28, height: 32)
             }
-            .buttonStyle(.borderless)
-            .disabled(!canStart)
-            .help("Record this meeting")
+            .buttonStyle(.borderless).disabled(!canStart)
+            .help("Gravar \(meeting.title)").accessibilityLabel("Gravar \(meeting.title)")
         }
-        .padding(.vertical, 4)
-        .padding(.horizontal, 6)
-        .background(
-            RoundedRectangle(cornerRadius: 6, style: .continuous)
-                .fill(inProgress ? Color.red.opacity(0.10) : Color.clear)
-        )
-    }
-
-    private func timeRange(_ start: Date, _ end: Date) -> String {
-        let fmt = DateFormatter()
-        fmt.timeStyle = .short
-        fmt.dateStyle = .none
-        return "\(fmt.string(from: start)) – \(fmt.string(from: end))"
+        .padding(.vertical, 8)
+        .padding(.horizontal, 8)
+        .background(inProgress ? Color.blue.opacity(0.06) : Color.clear, in: RoundedRectangle(cornerRadius: 7))
     }
 }

@@ -86,6 +86,11 @@ struct Meeting: Identifiable, Equatable {
 
 struct RecordingSession {
     let folderURL: URL
+    let savedFolderURL: URL
+
+    func finalize() throws {
+        try FileManager.default.moveItem(at: folderURL, to: savedFolderURL)
+    }
 
     let desktopURL: URL
 
@@ -95,7 +100,7 @@ struct RecordingSession {
     let startedAt: Date
     let meetingTitle: String?
 
-    static func create(now: Date, meetingTitle: String?) throws -> RecordingSession {
+    static func create(now: Date, meetingTitle: String?, root: URL? = nil) throws -> RecordingSession {
         let fm = FileManager.default
 
         let documents = try fm.url(
@@ -104,7 +109,7 @@ struct RecordingSession {
             appropriateFor: nil,
             create: true
         )
-        let recordingsRoot = documents
+        let recordingsRoot = root ?? documents
             .appendingPathComponent("Recordings", isDirectory: true)
 
         let dateFmt = DateFormatter()
@@ -124,19 +129,26 @@ struct RecordingSession {
 
         var folderURL = recordingsRoot.appendingPathComponent(folderName, isDirectory: true)
 
-        if fm.fileExists(atPath: folderURL.path) {
+        func isReserved(_ url: URL) -> Bool {
+            fm.fileExists(atPath: url.path)
+                || fm.fileExists(atPath: recordingsRoot.appendingPathComponent(".recording-" + url.lastPathComponent).path)
+        }
+        if isReserved(folderURL) {
             var n = 2
             var candidate = recordingsRoot.appendingPathComponent("\(folderName)-\(n)", isDirectory: true)
-            while fm.fileExists(atPath: candidate.path) {
+            while isReserved(candidate) {
                 n += 1
                 candidate = recordingsRoot.appendingPathComponent("\(folderName)-\(n)", isDirectory: true)
             }
             folderURL = candidate
         }
+        let savedFolderURL = folderURL
+        folderURL = recordingsRoot.appendingPathComponent(".recording-" + folderURL.lastPathComponent, isDirectory: true)
         try fm.createDirectory(at: folderURL, withIntermediateDirectories: true)
 
         return RecordingSession(
             folderURL: folderURL,
+            savedFolderURL: savedFolderURL,
             desktopURL: folderURL.appendingPathComponent("desktop.caf"),
             micURL: folderURL.appendingPathComponent("mic.caf"),
             outputURL: folderURL.appendingPathComponent("audio.m4a"),

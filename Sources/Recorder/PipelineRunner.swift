@@ -71,7 +71,7 @@ struct PipelineRunner {
         try data.write(to: folderURL.appendingPathComponent("meta.json"), options: .atomic)
     }
 
-    func run(metaFolderURL: URL?, context: Context) async throws -> String {
+    func run(metaFolderURL: URL?, mediaURL: URL, context: Context) async throws -> String {
         guard let docker = Self.resolveDocker() else { throw Failure.dockerMissing }
         var isDir: ObjCBool = false
         let composeFile = (pipelineDir as NSString).appendingPathComponent("docker-compose.yml")
@@ -89,6 +89,8 @@ struct PipelineRunner {
         process.executableURL = URL(fileURLWithPath: docker)
         process.arguments = [
             "compose", "-f", composeFile, "run", "--rm", "app", "run",
+            "--context", context.context,
+            "--only", metaFolderURL.map { $0.lastPathComponent + "/" } ?? mediaURL.lastPathComponent,
         ]
         process.currentDirectoryURL = URL(fileURLWithPath: pipelineDir)
 
@@ -168,7 +170,7 @@ struct PipelineRunner {
         return URL(fileURLWithPath: NSHomeDirectory()).appendingPathComponent("Movies/OBS")
     }
 
-    struct Outcome {
+    struct Outcome: Equatable {
         enum Kind: Equatable {
             case published
             case noSpeech

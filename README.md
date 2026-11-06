@@ -100,18 +100,33 @@ Granted on first use via standard system prompts (declared in `Info.plist`):
 
 ---
 
-## Transcription setup
+## Processing setup
 
-1. Get a Gemini API key from [Google AI Studio](https://aistudio.google.com/apikey).
-2. Open the panel → **Settings** → paste the key under **API key**. It's stored in the macOS
-   **Keychain** (never written to disk in plaintext, never committed).
-3. (Optional) Set **your name** under Identity — it's passed to the model as a hint that the
-   right-channel voice is usually you. There is no baked-in default; leave it blank to stay
-   anonymous.
-4. Toggle **auto-transcribe** on/off. With it off, recordings still save and you can transcribe
-   later.
+1. Open **Ajustes** and select your local `transcribe` repository (the folder containing
+   `docker-compose.yml`). Docker Desktop must be running to process recordings.
+2. Choose the recording context in the panel. Contexts come from your configured media folders.
+3. Save a recording and select **Processar**, or enable automatic processing in settings.
 
-The transcript is written next to the audio as `transcript.md`.
+Recording and processing have independent lifecycles. You can record, pause, save or discard
+another capture while the pipeline runs. Processing requests are queued in order, with one
+pipeline invocation at a time; each invocation filters transcription, summarization and
+publishing to the selected recording. Failed jobs remain available for retry. With automatic
+processing disabled, saved recordings wait for an explicit processing request.
+
+Active captures and mixes live in hidden `.recording-*` folders under `~/Documents/Recordings`.
+Only after audio and metadata have finished writing is the folder renamed to its final name,
+so the pipeline cannot import a live capture. If saving fails or the app exits unexpectedly,
+the raw files remain in that hidden folder for recovery (Finder: **Command–Shift–.**).
+
+The panel keeps recording controls and footer visible while the agenda, processing status
+and recording history scroll within the available screen height. History distinguishes a
+confirmed publication from a completed run, a failure, or a run with nothing pending.
+
+Run the regression checks with full Xcode selected:
+
+```sh
+DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer swift test
+```
 
 ---
 

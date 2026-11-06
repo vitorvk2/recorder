@@ -13,6 +13,7 @@ final class NotificationManager {
     var onStopRequested: (() -> Void)?
 
     private let delegate = Delegate()
+    private var hasScheduledMeetingAlert = false
 
     func requestAuthorization() async {
         let center = UNUserNotificationCenter.current()
@@ -63,9 +64,12 @@ final class NotificationManager {
 
         center.removePendingNotificationRequests(withIdentifiers: [Self.meetingEndRequestIdentifier])
         center.add(request)
+        hasScheduledMeetingAlert = true
     }
 
     func cancelMeetingEndAlert() {
+        guard hasScheduledMeetingAlert else { return }
+        hasScheduledMeetingAlert = false
         UNUserNotificationCenter.current()
             .removePendingNotificationRequests(withIdentifiers: [Self.meetingEndRequestIdentifier])
     }
