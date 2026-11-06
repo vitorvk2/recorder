@@ -368,6 +368,17 @@ struct RecorderPanel: View {
             .onDrag { recentDragProvider(entry) }
             .help("\(entry.displayTitle)\nArraste o arquivo ou use o menu de ações.")
             Menu {
+                if let url = entry.processingOutcome?.noteURL {
+                    Link(destination: url) {
+                        Label(url.scheme == "obsidian" ? "Abrir no Obsidian" : "Abrir no Notion",
+                              systemImage: "arrow.up.forward.square")
+                    }
+                } else {
+                    Button("Abrir ata") {}
+                        .disabled(true)
+                        .help("O link da ata ainda não está disponível nesta gravação.")
+                }
+                Divider()
                 if let log = entry.transcriptURL {
                     Button("Copiar log do processamento") { model.copyTextOfFile(log) }
                     Button("Copiar arquivo de log") { model.copyFileToPasteboard(log) }
