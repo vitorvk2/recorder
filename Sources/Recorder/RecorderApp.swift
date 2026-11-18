@@ -3,7 +3,13 @@ import SwiftUI
 @main
 struct RecorderApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
-    @State private var model = RecorderModel()
+    @State private var model: RecorderModel
+
+    init() {
+        let model = RecorderModel()
+        model.launch()
+        _model = State(initialValue: model)
+    }
 
     var body: some Scene {
         MenuBarExtra("Recorder", systemImage: menuBarSymbol) {

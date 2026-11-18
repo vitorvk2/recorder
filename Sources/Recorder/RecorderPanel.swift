@@ -108,6 +108,7 @@ struct RecorderPanel: View {
 
             Divider()
             contextRow
+            teamsRow
 
             HStack(spacing: 20) {
                 LevelMeter(label: "Sistema", symbol: "speaker.wave.2", level: model.desktopLevel, tint: .accentColor)
@@ -161,6 +162,23 @@ struct RecorderPanel: View {
 
     private var insetSurface: Color {
         Color(nsColor: .controlBackgroundColor).opacity(0.65)
+    }
+
+    private var teamsRow: some View {
+        HStack(spacing: 8) {
+            Circle().fill(teamsColor).frame(width: 7, height: 7)
+            Text(teamsText).font(.caption).foregroundStyle(.secondary).lineLimit(2)
+            Spacer()
+        }
+        .help(teamsText)
+    }
+
+    private var teamsText: String {
+        model.teamsInCall ? "Teams em chamada" : "Teams monitorado, sem chamada"
+    }
+
+    private var teamsColor: Color {
+        model.teamsInCall ? .green : .gray
     }
 
     private var contextRow: some View {

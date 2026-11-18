@@ -45,6 +45,10 @@ mic right**, the channels stay cleanly separated:
   (default 5 min), so a forgotten recording doesn't run forever.
 - **Meeting-end notification** with a "Stop Recording" action when a meeting's scheduled end
   passes while you're still recording.
+- **Automatic Teams capture**: starts at app launch and listens to Core Audio for Teams
+  opening the microphone, so scheduled meetings and ad-hoc calls are both caught without
+  opening the panel. Recording starts a few seconds after Teams takes the mic and stops once
+  Teams releases it. No polling and no extra permission; toggleable under Preferences > Teams.
 - **System-audio watchdog** that rebuilds the Core Audio tap if macOS's known process-tap
   regression makes it go silent mid-recording.
 

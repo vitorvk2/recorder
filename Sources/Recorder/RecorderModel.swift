@@ -29,6 +29,16 @@ final class RecorderModel {
         didSet { Preferences.silenceAutoStop = silenceAutoStopEnabled }
     }
 
+    var autoRecordTeams: Bool = true {
+        didSet { Preferences.autoRecordTeams = autoRecordTeams }
+    }
+
+    var autoStopTeams: Bool = true {
+        didSet { Preferences.autoStopTeams = autoStopTeams }
+    }
+
+    var teamsInCall: Bool = false
+
     var autoProcess: Bool = false {
         didSet { Preferences.autoProcess = autoProcess }
     }
@@ -73,11 +83,12 @@ final class RecorderModel {
 
     @ObservationIgnored private let recoverPublicationsAutomatically: Bool
 
-    init(recoverPublicationsAutomatically: Bool = true, runPipeline: @escaping (PipelineRunner, PendingTranscription, PipelineRunner.Context) async throws -> String = { runner, pending, context in
+    init(recoverPublicationsAutomatically: Bool = true, teamsObserver: TeamsCallObserver? = nil, runPipeline: @escaping (PipelineRunner, PendingTranscription, PipelineRunner.Context) async throws -> String = { runner, pending, context in
         try await runner.run(metaFolderURL: pending.metaFolderURL, mediaURL: pending.audioURL, context: context)
     }) {
         self.runPipeline = runPipeline
         self.recoverPublicationsAutomatically = recoverPublicationsAutomatically
+        self.teamsObserver = teamsObserver ?? TeamsCallObserver()
     }
 
     var recentRecordings: [RecordingEntry] = []
@@ -87,7 +98,10 @@ final class RecorderModel {
     @ObservationIgnored private let mic = MicCapture()
     @ObservationIgnored private let calendar = CalendarAccess()
     @ObservationIgnored private let notifications = NotificationManager()
+    @ObservationIgnored private let teamsObserver: TeamsCallObserver
     @ObservationIgnored private var silenceMonitor: SilenceMonitor?
+    @ObservationIgnored private var autoStartedSession = false
+    @ObservationIgnored private var silenceSuspendedForCall = false
 
     @ObservationIgnored private var elapsedTimer: Timer?
     @ObservationIgnored private var recordingStartedAt: Date?
@@ -108,12 +122,17 @@ final class RecorderModel {
     @ObservationIgnored private var lastTranscription: PendingTranscription?
 
     func onAppear() {
-        guard !didInitialize else {
-            refreshContexts()
-            refreshRecordings()
-            refreshMeetings()
+        guard didInitialize else {
+            launch()
             return
         }
+        refreshContexts()
+        refreshRecordings()
+        refreshMeetings()
+    }
+
+    func launch() {
+        guard !didInitialize else { return }
         didInitialize = true
         loadPreferences()
 
@@ -144,6 +163,8 @@ final class RecorderModel {
             }
         }
 
+        startTeamsMonitoring()
+
         tap.onFatalError = { [weak self] error in
             DispatchQueue.main.async {
                 self?.statusMessage = "Erro no áudio do sistema: \(error.localizedDescription)"
@@ -156,8 +177,24 @@ final class RecorderModel {
         }
     }
 
+    func startTeamsMonitoring() {
+        teamsObserver.onFirstCall = { [weak self] in
+            self?.handleTeamsFirstCall()
+        }
+        teamsObserver.onAllCallsEnded = { [weak self] in
+            self?.handleTeamsAllCallsEnded()
+        }
+        teamsObserver.onChange = { [weak self] in
+            guard let self else { return }
+            self.teamsInCall = self.teamsObserver.isInCall
+        }
+        teamsObserver.start()
+    }
+
     private func loadPreferences() {
         localSpeakerName = Preferences.speakerName
+        autoRecordTeams = Preferences.autoRecordTeams
+        autoStopTeams = Preferences.autoStopTeams
         silenceTimeout = Preferences.silenceTimeout
         silenceThresholdDB = Preferences.silenceThresholdDB
         silenceAutoStopEnabled = Preferences.silenceAutoStop
@@ -249,6 +286,37 @@ final class RecorderModel {
         startElapsedTimer(from: now)
     }
 
+    func handleTeamsFirstCall() {
+        teamsInCall = true
+        if autoRecordTeams, state == .idle {
+            startRecording(meeting: nil)
+            if state != .idle {
+                autoStartedSession = true
+                statusMessage = "Chamada do Teams detectada, gravando"
+                TeamsCallObserver.logger.notice("Auto-recording started for Teams call")
+            } else {
+                TeamsCallObserver.logger.error("Auto-recording failed: \(self.statusMessage ?? "unknown error", privacy: .public)")
+            }
+        }
+        if state != .idle, silenceAutoStopEnabled, !silenceSuspendedForCall {
+            silenceMonitor?.stop()
+            silenceSuspendedForCall = true
+        }
+    }
+
+    func handleTeamsAllCallsEnded() {
+        teamsInCall = false
+        if silenceSuspendedForCall {
+            silenceSuspendedForCall = false
+            if state != .idle, silenceAutoStopEnabled {
+                silenceMonitor?.start()
+            }
+        }
+        guard autoStopTeams, autoStartedSession, state != .idle else { return }
+        TeamsCallObserver.logger.notice("Auto-recording stopped: all Teams calls ended")
+        saveAndStop()
+    }
+
     func togglePause() {
         switch state {
         case .recording:
@@ -338,6 +406,8 @@ final class RecorderModel {
         currentSession = nil
         activeMeeting = nil
         silenceMonitor = nil
+        autoStartedSession = false
+        silenceSuspendedForCall = false
     }
 
     func trashAndStop() {
@@ -359,6 +429,8 @@ final class RecorderModel {
         currentSession = nil
         activeMeeting = nil
         silenceMonitor = nil
+        autoStartedSession = false
+        silenceSuspendedForCall = false
         desktopLevel = 0
         micLevel = 0
         elapsed = 0
@@ -413,6 +485,8 @@ final class RecorderModel {
         currentSession = nil
         activeMeeting = nil
         silenceMonitor = nil
+        autoStartedSession = false
+        silenceSuspendedForCall = false
         elapsed = 0
     }
 

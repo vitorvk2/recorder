@@ -4,6 +4,8 @@ enum Preferences {
     private static let defaults = UserDefaults.standard
 
     private enum Key {
+        static let autoRecordTeams    = "autoRecordTeamsCalls"
+        static let autoStopTeams       = "autoStopTeamsCalls"
         static let speakerName        = "localSpeakerName"
         static let silenceTimeout     = "silenceTimeoutSeconds"
         static let silenceThresholdDB = "silenceThresholdDB"
@@ -12,6 +14,16 @@ enum Preferences {
         static let pipelineDir        = "pipelineDirectory"
         static let contexts           = "pipelineContexts"
         static let lastContext        = "lastUsedContext"
+    }
+
+    static var autoRecordTeams: Bool {
+        get { defaults.object(forKey: Key.autoRecordTeams) == nil ? true : defaults.bool(forKey: Key.autoRecordTeams) }
+        set { defaults.set(newValue, forKey: Key.autoRecordTeams) }
+    }
+
+    static var autoStopTeams: Bool {
+        get { defaults.object(forKey: Key.autoStopTeams) == nil ? true : defaults.bool(forKey: Key.autoStopTeams) }
+        set { defaults.set(newValue, forKey: Key.autoStopTeams) }
     }
 
     static var speakerName: String {

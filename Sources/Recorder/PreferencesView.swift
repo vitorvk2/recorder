@@ -60,6 +60,17 @@ private struct GeneralPreferences: View {
             } header: {
                 Text("Parada automática")
             }
+
+            Section {
+                Toggle("Gravar chamadas do Teams automaticamente", isOn: $model.autoRecordTeams)
+                Toggle("Encerrar quando todas as chamadas terminarem", isOn: $model.autoStopTeams)
+                    .disabled(!model.autoRecordTeams)
+                Text("Detecta chamadas e reuniões do Teams, com ou sem agenda, quando o Teams abre o microfone. Encerra quando o Teams libera o microfone. Gravações iniciadas por você nunca são encerradas sozinhas.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            } header: {
+                Text("Teams")
+            }
         }
         .formStyle(.grouped)
     }
